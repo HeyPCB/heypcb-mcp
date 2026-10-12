@@ -1,0 +1,55 @@
+{
+  "name": "@heypcb/mcp",
+  "version": "0.1.2",
+  "description": "HeyPCB for AI agents: a local MCP server (stdio) that proxies to HeyPCB's remote MCP server and adds local KiCad upload and export-to-disk tools.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HeyPCB/heypcb-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HeyPCB/heypcb-mcp/issues"
+  },
+  "type": "module",
+  "bin": {
+    "heypcb-mcp": "dist/cli.js"
+  },
+  "files": [
+    "dist/cli.js",
+    "dist/THIRD-PARTY-NOTICES.txt",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "homepage": "https://heypcb.ai/mcp",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "kicad",
+    "pcb",
+    "heypcb",
+    "claude",
+    "codex",
+    "cursor"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node scripts/clean.mjs .test-build && tsc -p tsconfig.test.json && node scripts/run-tests.mjs",
+    "test:smoke": "node scripts/clean.mjs .test-build && tsc -p tsconfig.test.json && node scripts/run-tests.mjs smoke",
+    "prepack": "node scripts/build.mjs"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.30.1",
+    "@types/node": "22.20.5",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3",
+    "zod": "4.6.5"
+  },
+  "packageManager": "pnpm@9.15.9"
+}

@@ -1,0 +1,9 @@
+# This folder is its OWN pnpm workspace root, on purpose.
+#
+# pnpm looks upward for pnpm-workspace.yaml. Inside a larger workspace (this
+# package is developed inside one and published from there), a bare
+# `pnpm install` here would find the outer workspace and install (and
+# re-lock) all of it. With this file, pnpm stops here: a bare install, or
+# `pnpm install --ignore-workspace` (CI and the README), both resolve
+# against this folder's pnpm-lock.yaml and never touch anything above it.
+packages: []
