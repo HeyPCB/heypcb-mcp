@@ -4,7 +4,14 @@ HeyPCB for AI agents. Add HeyPCB to Claude Code, Codex, Cursor or Claude
 Desktop and design real KiCad boards from your agent: HeyPCB's server does
 the engineering (Inky's design agent, parts, placement, routing, DRC/ERC,
 fab checks), and your agent calls a few high-level tools such as
-`build_board`, `get_board`, `check_board` and `export`.
+`build_board`, `get_board`, `check_board` and `export`. Or your agent
+designs the board itself with HeyPCB's parts library, proven circuit blocks
+and checks: `search_parts`, `get_part`, `add_parts`, `add_block`, `connect`,
+`get_netlist` and the rest of the parts and circuit tools, then lays it out
+with `set_board_outline`, `set_board_rules`, `move_part`, `lock_parts`,
+`add_ground_pour` and `get_board_layout`, and takes it to fab-ready by
+following `check_board`: every finding names the call that fixes it
+(`fixWith`).
 
 ## The quickest way: the remote server (nothing to install)
 
@@ -142,7 +149,8 @@ npx @heypcb/mcp status      who this computer is signed in as
 
 Tools cost what the same work costs on heypcb.ai, from the same account and
 wallet. `estimate` prices an operation before it runs; `whoami` shows the
-balance.
+balance. The parts and circuit tools your own agent designs with are free
+(rate-limited per account; `whoami` says the limits).
 
 ## Source
 
