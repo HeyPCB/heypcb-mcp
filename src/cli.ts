@@ -36,6 +36,17 @@ Environment:
                      %APPDATA%\\heypcb on Windows)
 `;
 
+/**
+ * Said on stderr when a person, not an agent, started the server: stdin is a
+ * terminal, or it closed before any message arrived. Without it the server
+ * waits for a client a person will never type, or exits without a word.
+ */
+const SERVER_HINT = `heypcb-mcp ${VERSION} is an MCP server: your coding agent starts it, you don't run it by hand.
+  Add it to Claude Code:  claude mcp add heypcb -- npx -y @heypcb/mcp
+  Sign in once:           npx @heypcb/mcp login
+  More:                   npx @heypcb/mcp --help, or https://heypcb.ai/mcp
+`;
+
 function openBrowser(url: string): boolean {
   try {
     const [cmd, args] =
@@ -70,7 +81,16 @@ async function main(argv: string[]): Promise<number> {
     const transport = new StdioServerTransport();
     const running = await startServer(transport, cfg.ok ? { config: cfg.config, store } : { config: null, configRefusal: cfg.refusal, store });
     if (!cfg.ok) process.stderr.write(`[heypcb-mcp] ${cfg.refusal.error} ${cfg.refusal.fix}\n`);
+    if (process.stdin.isTTY) process.stderr.write(SERVER_HINT);
+    let heard = false;
+    process.stdin.once("data", () => {
+      heard = true;
+    });
+    let stopping = false;
     const stop = () => {
+      if (stopping) return;
+      stopping = true;
+      if (!heard && !process.stdin.isTTY) process.stderr.write(SERVER_HINT);
       running.close().finally(() => process.exit(0));
     };
     process.stdin.on("end", stop);

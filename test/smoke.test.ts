@@ -37,6 +37,23 @@ test("dist/cli.js serves the remote tools and the local ones over stdio", { skip
   assert.deepEqual((res.structuredContent as { echoed: unknown }).echoed, { text: "from the bundle" });
 });
 
+test("dist/cli.js run by hand with nothing on stdin says what it is, and exits 0", { skip: !existsSync(cli) && "dist/cli.js is not built" }, async () => {
+  const { spawnSync } = await import("node:child_process");
+  const r = spawnSync(process.execPath, [cli], { input: "", env: { PATH: process.env.PATH ?? "", HEYPCB_CONFIG_DIR: tmpDir() }, encoding: "utf8", timeout: 15000 });
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "", "stdout carries the protocol only");
+  assert.match(r.stderr, /is an MCP server/);
+  assert.match(r.stderr, /claude mcp add heypcb -- npx -y @heypcb\/mcp/);
+});
+
+test("dist/cli.js says nothing extra when an agent did connect", { skip: !existsSync(cli) && "dist/cli.js is not built" }, async () => {
+  const { spawnSync } = await import("node:child_process");
+  const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } }) + "\n";
+  const r = spawnSync(process.execPath, [cli], { input: init, env: { PATH: process.env.PATH ?? "", HEYPCB_CONFIG_DIR: tmpDir(), HEYPCB_API_KEY: TEST_KEY, HEYPCB_MCP_URL: "http://127.0.0.1:9/mcp" }, encoding: "utf8", timeout: 15000 });
+  assert.equal(r.status, 0);
+  assert.doesNotMatch(r.stderr, /is an MCP server/);
+});
+
 test("dist/cli.js with no sign-in still starts, and every tool says how to sign in", { skip: !existsSync(cli) && "dist/cli.js is not built" }, async () => {
   const fake = await startFakeHeypcb({});
   closers.push(fake.close);
