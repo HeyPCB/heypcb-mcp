@@ -91,8 +91,8 @@ test(".heypcbignore patterns: folders, globs, anchored and not", () => {
   assert.ok(!m("secretive.kicad_sch"));
 });
 
-async function ctx() {
-  const fake = await startFakeHeypcb({ acceptTokens: new Set([TEST_KEY]) });
+async function ctx(newFormatOnly = false) {
+  const fake = await startFakeHeypcb({ acceptTokens: new Set([TEST_KEY]), newFormatOnly });
   closers.push(fake.close);
   const config = configFor(fake.mcpUrl, { HEYPCB_API_KEY: TEST_KEY });
   const dir = tmpDir();
@@ -127,4 +127,22 @@ test("install_parts writes heypcb libraries and lib-table entries, and a second 
   assert.deepEqual(again.symbols.unchanged, ["RP2040", "C_100nF"]);
   assert.deepEqual(again.written, []);
   assert.deepEqual(await snapshot(), before);
+});
+
+test("parts come in the project's own KiCad format, and a part only available newer is left out", async () => {
+  const { ctx: c, root, fake } = await ctx();
+  await fsp.writeFile(path.join(root, "p.kicad_sch"), "(kicad_sch (version 20231120) (generator eeschema))\n");
+  await fsp.writeFile(path.join(root, "p.kicad_pcb"), "(kicad_pcb (version 20240108) (generator pcbnew))\n");
+  const r = await installParts(c, root, ["C2040"]);
+  assert.deepEqual(r.installed.map((i) => i.part), ["C2040"]);
+  assert.match(await fsp.readFile(path.join(root, "heypcb.kicad_sym"), "utf8"), /\(version 20231120\)/, "a KiCad 8 project gets a KiCad 8 library");
+  const asked = fake.requests.find((q) => q.path === "/v1/parts/C2040/assets");
+  assert.ok(asked);
+
+  const newer = await ctx(true);
+  await fsp.writeFile(path.join(newer.root, "p.kicad_sch"), "(kicad_sch (version 20231120) (generator eeschema))\n");
+  const r2 = await installParts(newer.ctx, newer.root, ["C2040", "C1525"]);
+  assert.deepEqual(r2.failed.map((f) => [f.part, f.code]), [["C2040", "part_too_new"]]);
+  assert.deepEqual(r2.installed.map((i) => i.part), ["C1525"]);
+  assert.doesNotMatch(await fsp.readFile(path.join(newer.root, "heypcb.kicad_sym"), "utf8"), /RP2040/);
 });

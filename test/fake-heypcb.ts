@@ -96,6 +96,8 @@ export type FakeOptions = {
   prices?: Record<string, number>;
   /** Leave `_meta.heypcb.revision` out of results (the client then asks the file list). */
   omitRevision?: boolean;
+  /** Part assets only in KiCad 9's format, whatever format is asked for. */
+  newFormatOnly?: boolean;
   /** Called while a design tool runs, before it answers (to act "during the call"). */
   duringCall?: (tool: string) => Promise<void> | void;
 };
@@ -334,9 +336,12 @@ export async function startFakeHeypcb(opts: FakeOptions = {}): Promise<Fake> {
       const pa = /^\/v1\/parts\/([^/]+)\/assets$/.exec(url.pathname);
       if (pa && req.method === "GET") {
         if (!bearerOk(req)) return unauthorized(res);
-        const a = PART_ASSETS[decodeURIComponent(pa[1])];
+        const a = PART_ASSETS[decodeURIComponent(pa[1])] as { symbol: { text: string } } | undefined;
         if (!a) return json(res, 404, { ok: false, code: "part_not_found", error: "no such part", fix: "", retryable: false });
-        return json(res, 200, { ok: true, ...a });
+        // Like the server: the symbol in the project's own format when it asks for an older one (unless the part has none older).
+        const sch = Number(url.searchParams.get("sch") ?? "");
+        const text = sch && sch < 20241209 && !opts.newFormatOnly ? a.symbol.text.replace("(version 20241209)", `(version ${sch})`) : a.symbol.text;
+        return json(res, 200, { ok: true, ...a, symbol: { ...a.symbol, text } });
       }
       json(res, 404, { ok: false, code: "not_found", error: "nothing here", fix: "", retryable: false });
     } catch (err) {

@@ -13,8 +13,14 @@
  * `${KIPRJMOD}/heypcb.3dshapes/<file>`. Every other byte of the existing
  * files is kept (sexpr.ts edits in place).
  *
+ * The files must open in the KiCad the project is saved with: the request
+ * names the project's schematic and board format versions (`sch`, `pcb`),
+ * and a part whose symbol or footprint is still newer than that is left
+ * out (`part_too_new`) rather than written into a library that KiCad
+ * cannot load.
+ *
  * The server's part assets, as this client reads them:
- *   GET /v1/parts/{id}/assets → { ok, part: { id, lcsc? },
+ *   GET /v1/parts/{id}/assets?sch=<version>&pcb=<version> → { ok, part: { id, lcsc? },
  *     symbol: { name, text },               // `(symbol "NAME" …)` or a whole `(kicad_symbol_lib …)`
  *     footprint: { name, text } | null,     // `(footprint "NAME" …)`
  *     model: { name, contentBase64 } | null }
@@ -38,6 +44,7 @@ type Assets = {
   id: string;
   symbols: Array<{ name: string; text: string }>;
   symbolVersion: number | null;
+  footprintVersion: number | null;
   footprint: { name: string; text: string } | null;
   model: { name: string; data: Buffer } | null;
 };
@@ -81,10 +88,27 @@ function symbolsOf(id: string, text: string): Array<{ name: string; text: string
   });
 }
 
-export async function fetchAssets(ctx: ApiContext, id: string, signal?: AbortSignal): Promise<Assets> {
+/** The format versions of a project's own schematics and boards (the newest of each), or null where it has none. */
+export async function projectFormats(root: string): Promise<{ sch: number | null; pcb: number | null }> {
+  const out: { sch: number | null; pcb: number | null } = { sch: null, pcb: null };
+  for (const name of await fsp.readdir(root).catch(() => [] as string[])) {
+    const kind = name.endsWith(".kicad_sch") ? "sch" : name.endsWith(".kicad_pcb") ? "pcb" : null;
+    if (!kind || name.startsWith("_autosave-")) continue;
+    const head = await fsp.readFile(path.join(root, name), "utf8").then((t) => t.slice(0, 4096), () => "");
+    const v = fileVersion(head);
+    if (v !== null) out[kind] = Math.max(out[kind] ?? 0, v);
+  }
+  return out;
+}
+
+export async function fetchAssets(ctx: ApiContext, id: string, formats: { sch: number | null; pcb: number | null } = { sch: null, pcb: null }, signal?: AbortSignal): Promise<Assets> {
+  const q = new URLSearchParams();
+  if (formats.sch) q.set("sch", String(formats.sch));
+  if (formats.pcb) q.set("pcb", String(formats.pcb));
+  const query = q.size ? `?${q}` : "";
   let res: Response;
   try {
-    res = await ctx.auth.fetch(`${ctx.config.apiBase}/v1/parts/${encodeURIComponent(id)}/assets`, { headers: { accept: "application/json" }, signal: signal ? anySignal(signal, 120_000) : AbortSignal.timeout(120_000) });
+    res = await ctx.auth.fetch(`${ctx.config.apiBase}/v1/parts/${encodeURIComponent(id)}/assets${query}`, { headers: { accept: "application/json" }, signal: signal ? anySignal(signal, 120_000) : AbortSignal.timeout(120_000) });
   } catch (err) {
     if (err instanceof RefusalError || signal?.aborted) throw err;
     throw new RefusalError(networkRefusal(err, `part ${id}'s files`));
@@ -109,7 +133,23 @@ export async function fetchAssets(ctx: ApiContext, id: string, signal?: AbortSig
     if (!name || !/\.(step|stp|wrl)$/i.test(name)) throw bad(id, "the 3D model has no usable file name");
     model = { name, data: Buffer.from(b.model.contentBase64, "base64") };
   }
-  return { id, symbols, symbolVersion: fileVersion(b.symbol.text), footprint, model };
+  const symbolVersion = fileVersion(b.symbol.text);
+  const footprintVersion = footprint ? fileVersion(footprint.text) : null;
+  for (const [what, v, max] of [
+    ["symbol", symbolVersion, formats.sch],
+    ["footprint", footprintVersion, formats.pcb],
+  ] as const) {
+    if (v !== null && max !== null && v > max) {
+      throw new RefusalError(
+        refusal("part_too_new", `HeyPCB's ${what} for part ${id} is in a newer KiCad format (${v}) than this project (${max}), so the KiCad it is saved with could not load it.`, "Open and save the project in a newer KiCad, or leave this part out.", {
+          part: id,
+          partFormat: v,
+          projectFormat: max,
+        })
+      );
+    }
+  }
+  return { id, symbols, symbolVersion, footprintVersion, footprint, model };
 }
 
 /** The footprint's text with its name and every model path pointed at this project's copies. */
@@ -163,9 +203,10 @@ export async function installParts(ctx: ApiContext, root: string, parts: string[
     written: [],
   };
   const assets: Assets[] = [];
+  const formats = await projectFormats(root);
   for (const id of [...new Set(parts)]) {
     try {
-      assets.push(await fetchAssets(ctx, id, signal));
+      assets.push(await fetchAssets(ctx, id, formats, signal));
     } catch (err) {
       if (!(err instanceof RefusalError)) throw err;
       const r: Refusal = err.refusal;
