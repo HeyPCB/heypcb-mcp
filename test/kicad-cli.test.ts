@@ -131,7 +131,10 @@ test("the libraries install_parts writes load in KiCad", needsKicad, async () =>
     const fp = await run(cli!.bin, ["fp", "export", "svg", "-o", out, path.join(root, "heypcb.pretty")]);
     assert.equal(fp.code, 0, fp.stderr);
     const plotted = await fsp.readdir(out);
-    for (const name of ["C_0402", "C_100nF", "QFN-56_7x7mm", "RP2040"]) assert.ok(plotted.some((f) => f.startsWith(name) && f.endsWith(".svg")), `${name} plotted: ${plotted.join(", ")}`);
+    // KiCad 8 lowercases the symbols' file names (rp2040.svg), 9 and later keep the case and add the unit (RP2040_unit1.svg).
+    for (const name of ["C_0402", "C_100nF", "QFN-56_7x7mm", "RP2040"]) {
+      assert.ok(plotted.some((f) => f.toLowerCase().startsWith(name.toLowerCase()) && f.endsWith(".svg")), `${name} plotted: ${plotted.join(", ")}`);
+    }
   } finally {
     await fake.close();
   }
