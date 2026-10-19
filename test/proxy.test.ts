@@ -14,7 +14,7 @@ import { CredentialStore } from "../src/credentials.ts";
 import { startServer, type Running } from "../src/server.ts";
 import { LOCAL_TOOLS } from "../src/local-tools.ts";
 import { OFFLINE_CATALOG } from "../src/catalog.ts";
-import { REFUSAL, REMOTE_TOOLS, startFakeHeypcb, type Fake, type FakeOptions } from "./fake-heypcb.ts";
+import { FAKE_TOOLS, REFUSAL, startFakeHeypcb, type Fake, type FakeOptions } from "./fake-heypcb.ts";
 import { configFor, TEST_KEY, tmpDir, until } from "./helpers.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -43,10 +43,10 @@ async function setup(env: Record<string, string>, fakeOpts: FakeOptions = {}, fa
   return { fake: f, client, store, config, running, listChangedCount: () => listChanged };
 }
 
-test("lists the remote tools 1:1 (names, schemas, descriptions) and adds the two local tools", async () => {
+test("lists the remote tools 1:1 (names, schemas, descriptions) and adds the local tools", async () => {
   const { client } = await setup({ HEYPCB_API_KEY: TEST_KEY }, { acceptTokens: new Set([TEST_KEY]) });
   const { tools } = await client.listTools();
-  for (const remote of REMOTE_TOOLS) {
+  for (const remote of FAKE_TOOLS) {
     assert.deepEqual(
       tools.find((t) => t.name === remote.name),
       remote,
@@ -55,7 +55,7 @@ test("lists the remote tools 1:1 (names, schemas, descriptions) and adds the two
   }
   assert.deepEqual(
     tools.map((t) => t.name),
-    [...REMOTE_TOOLS.map((t) => t.name), ...LOCAL_TOOLS.map((t) => t.name)]
+    [...FAKE_TOOLS.map((t) => t.name), ...LOCAL_TOOLS.map((t) => t.name)]
   );
   const instructions = client.getInstructions() ?? "";
   assert.match(instructions, /Fake HeyPCB remote: use echo\./, "the remote server's instructions are passed on");
@@ -138,7 +138,7 @@ test("without credentials: the offline names plus the local tools, and every too
   const { tools } = await client.listTools();
   assert.deepEqual(
     tools.map((t) => t.name),
-    [...OFFLINE_CATALOG.map((t) => t.name), "upload_kicad_project", "save_export"]
+    [...OFFLINE_CATALOG.map((t) => t.name), ...LOCAL_TOOLS.map((t) => t.name)]
   );
   for (const name of ["build_board", "whoami", "upload_kicad_project", "save_export"]) {
     const res = await client.callTool({ name, arguments: name === "save_export" ? { project: "p1", kind: "bom", dir: "~/x" } : name === "upload_kicad_project" ? { path: "~/x" } : {} });

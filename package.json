@@ -42,6 +42,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "node scripts/clean.mjs .test-build && tsc -p tsconfig.test.json && node scripts/run-tests.mjs",
     "test:smoke": "node scripts/clean.mjs .test-build && tsc -p tsconfig.test.json && node scripts/run-tests.mjs smoke",
+    "test:kicad": "node scripts/clean.mjs .test-build && tsc -p tsconfig.test.json && node scripts/run-tests.mjs kicad-cli",
     "prepack": "node scripts/build.mjs"
   },
   "devDependencies": {

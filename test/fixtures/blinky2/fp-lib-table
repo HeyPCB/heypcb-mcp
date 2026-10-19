@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "blinky")(type "KiCad")(uri "${KIPRJMOD}/libs/blinky.pretty")(options "")(descr "Project footprints"))
+)

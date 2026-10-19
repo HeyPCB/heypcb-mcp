@@ -1,7 +1,7 @@
 // Run the compiled tests with node's own runner, one file list for every
 // Node version (a directory or glob argument means different things on 18,
 // 20 and 22). `node scripts/run-tests.mjs smoke` runs only the smoke test,
-// which needs dist/ built first.
+// which needs dist/ built first; `… kicad-cli` only the kicad-cli tests.
 import { spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import path from "node:path";

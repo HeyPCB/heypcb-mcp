@@ -1,0 +1,67 @@
+(kicad_sch
+  (version 20231120)
+  (generator "eeschema")
+  (generator_version "8.0")
+  (uuid "8f1c3a52-1b2d-4e5f-9a10-000000000001")
+  (paper "A4")
+  (lib_symbols
+    (symbol "blinky:R"
+    (pin_numbers hide)
+    (pin_names (offset 0))
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "R" (at 2.032 0 90) (effects (font (size 1.27 1.27))))
+    (property "Value" "R" (at 0 0 90) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "blinky:R_0603" (at -1.778 0 90) (effects (font (size 1.27 1.27)) hide))
+    (property "Datasheet" "" (at 0 0 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Description" "Resistor" (at 0 0 0) (effects (font (size 1.27 1.27)) hide))
+    (symbol "R_0_1"
+      (rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254) (type default)) (fill (type none)))
+    )
+    (symbol "R_1_1"
+      (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+      (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+    )
+  )
+  )
+  (symbol
+    (lib_id "blinky:R")
+    (at 100 80 0)
+    (unit 1)
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (dnp no)
+    (uuid "8f1c3a52-1b2d-4e5f-9a10-000000000010")
+    (property "Reference" "R1" (at 102 80 0) (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "1k" (at 102 82 0) (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Footprint" "blinky:R_0603" (at 100 80 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Datasheet" "" (at 100 80 0) (effects (font (size 1.27 1.27)) hide))
+    (pin "1" (uuid "8f1c3a52-1b2d-4e5f-9a10-000000000011"))
+    (pin "2" (uuid "8f1c3a52-1b2d-4e5f-9a10-000000000012"))
+    (instances
+      (project "blinky"
+        (path "/8f1c3a52-1b2d-4e5f-9a10-000000000001" (reference "R1") (unit 1))
+      )
+    )
+  )
+  (sheet
+    (at 140 60)
+    (size 20 15)
+    (fields_autoplaced yes)
+    (stroke (width 0.1524) (type solid))
+    (fill (color 0 0 0 0.0000))
+    (uuid "8f1c3a52-1b2d-4e5f-9a10-000000000020")
+    (property "Sheetname" "Power" (at 140 59 0) (effects (font (size 1.27 1.27)) (justify left bottom)))
+    (property "Sheetfile" "sub/power.kicad_sch" (at 140 76 0) (effects (font (size 1.27 1.27)) (justify left top)))
+    (instances
+      (project "blinky"
+        (path "/8f1c3a52-1b2d-4e5f-9a10-000000000001" (page "2"))
+      )
+    )
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)

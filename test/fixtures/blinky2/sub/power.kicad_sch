@@ -1,0 +1,9 @@
+(kicad_sch
+  (version 20231120)
+  (generator "eeschema")
+  (generator_version "8.0")
+  (uuid "8f1c3a52-1b2d-4e5f-9a10-000000000002")
+  (paper "A4")
+  (lib_symbols)
+  (text "Power goes here" (exclude_from_sim no) (at 50 50 0) (effects (font (size 1.27 1.27))) (uuid "8f1c3a52-1b2d-4e5f-9a10-000000000030"))
+)

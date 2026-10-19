@@ -13,7 +13,10 @@
  *   `.kicad_mod` files, legacy `.lib`/`.dcm`.
  *
  * Never: 3D models, backups (`*-backups/`, `*.bak`, `*-bak`, `_autosave-*`),
- * `.history`, `.kicad_prl`, lock files, `fp-info-cache`.
+ * `.history`, `.kicad_prl`, lock files, `fp-info-cache`, the `.heypcb/`
+ * workspace folder, and whatever the project's `.heypcbignore` names (one
+ * pattern a line, gitignore-style: `*`, `**`, a trailing `/` for a folder,
+ * a pattern without `/` matching at any depth, `#` comments).
  *
  * Refused, nothing partial: a file or link that resolves outside the project
  * folder (`unsafe_path`), more than 50 MB in total (`project_too_large`, the
@@ -30,7 +33,7 @@ import { localLibraryUris, sheetFiles } from "./sexpr.ts";
 export const MAX_PROJECT_BYTES = 50 * 1024 * 1024;
 const MAX_SHEETS = 512;
 const MODEL_EXTENSIONS = [".step", ".stp", ".wrl", ".wrz", ".iges", ".igs", ".glb", ".gltf", ".stl", ".vrml", ".x_t", ".3ds", ".obj", ".u3d", ".3mf"];
-const BACKUP_DIR = /(-backups|^\.history|^#auto_saved_files#)$/i;
+const BACKUP_DIR = /(-backups|^\.history|^#auto_saved_files#|^\.heypcb)$/i;
 const BACKUP_FILE = /(^_autosave-|\.bak$|-bak$|\.lck$|^~|\.kicad_prl$|^fp-info-cache$|^#auto_saved_files#)/i;
 
 const SYMLINK_FIX = "Replace the link with the file itself (copy it into the project folder), then call upload_kicad_project again.";
@@ -63,6 +66,38 @@ export function excluded(rel: string): string | null {
   return null;
 }
 
+export const IGNORE_FILE = ".heypcbignore";
+
+function globPart(glob: string): string {
+  let out = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*" && glob[i + 1] === "*") {
+      out += glob[i + 2] === "/" ? "(?:.*/)?" : ".*";
+      i += glob[i + 2] === "/" ? 2 : 1;
+    } else if (c === "*") out += "[^/]*";
+    else if (c === "?") out += "[^/]";
+    else out += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  }
+  return out;
+}
+
+/** A test for project-relative POSIX paths from `.heypcbignore`'s text. */
+export function ignoreMatcher(text: string): (rel: string) => boolean {
+  const res: RegExp[] = [];
+  for (let line of text.split(/\r?\n/)) {
+    line = line.trim();
+    if (!line || line.startsWith("#")) continue;
+    const dir = line.endsWith("/");
+    if (dir) line = line.slice(0, -1);
+    const anchored = line.includes("/");
+    if (line.startsWith("/")) line = line.slice(1);
+    const body = globPart(line);
+    res.push(new RegExp(`^${anchored ? "" : "(?:.*/)?"}${body}${dir ? "/" : "(?:/|$)"}`));
+  }
+  return (rel) => res.some((r) => r.test(rel));
+}
+
 function tilde(p: string): string {
   const home = os.homedir();
   return p.startsWith(home) ? "~" + p.slice(home.length) : p;
@@ -83,6 +118,7 @@ class Walker {
   files = new Map<string, ProjectFile>();
   skipped: Array<{ path: string; reason: string }> = [];
   missing: Array<{ path: string; kind: string }> = [];
+  ignored: (rel: string) => boolean = () => false;
 
   constructor(root: string) {
     this.root = path.resolve(root);
@@ -90,6 +126,8 @@ class Walker {
 
   async init(): Promise<void> {
     this.realRoot = await fsp.realpath(this.root);
+    const text = await fsp.readFile(path.join(this.root, IGNORE_FILE), "utf8").catch(() => null);
+    if (text) this.ignored = ignoreMatcher(text);
   }
 
   rel(p: string): string {
@@ -118,7 +156,7 @@ class Walker {
 
   async add(p: string, kind: string): Promise<string | null> {
     const rel = this.rel(p);
-    const why = excluded(rel);
+    const why = excluded(rel) ?? (this.ignored(rel) ? "heypcbignore" : null);
     if (why) {
       this.skipped.push({ path: rel, reason: why });
       return null;

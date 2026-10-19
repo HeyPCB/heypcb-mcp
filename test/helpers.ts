@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync } from "node:fs";
+import { mkdtempSync, promises as fsp, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { inflateRawSync } from "node:zlib";
@@ -59,4 +59,13 @@ export async function until(pred: () => boolean, ms = 3000): Promise<void> {
     if (Date.now() > end) throw new Error("timed out waiting");
     await sleep(10);
   }
+}
+
+export const FIXTURES = path.join(process.cwd(), "test", "fixtures");
+
+/** A fresh copy of a fixture project (test/fixtures/<name>) under `home`/projects. */
+export async function copyFixture(name: string, home: string): Promise<string> {
+  const dst = path.join(home, "projects", name);
+  await fsp.cp(path.join(FIXTURES, name), dst, { recursive: true });
+  return dst;
 }

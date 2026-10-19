@@ -1,5 +1,6 @@
 /**
- * `npx -y @heypcb/mcp`            the MCP server, on stdio (what an agent runs)
+ * `npx -y @heypcb/mcp`            the MCP server, on stdio (what an agent runs);
+ *                                  `--max-spend <amount>` caps what it may spend
  * `npx @heypcb/mcp login`         sign in with a code you approve at heypcb.ai/connect
  * `npx @heypcb/mcp logout`        sign out here and end that sign-in on HeyPCB
  * `npx @heypcb/mcp status`        who this computer is signed in as
@@ -10,6 +11,7 @@
 import { spawn } from "node:child_process";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Auth, deviceLogin, LoginError, logout } from "./auth.ts";
+import { parseMaxSpend } from "./billing.ts";
 import { loadConfig, settingsKeysUrl } from "./config.ts";
 import { CredentialStore, credentialsPath } from "./credentials.ts";
 import { RefusalError } from "./refusal.ts";
@@ -20,6 +22,8 @@ const HELP = `HeyPCB MCP server ${VERSION}
 
 Usage:
   npx -y @heypcb/mcp            Run the MCP server on stdio (add this to your agent).
+        --max-spend <amount>    Refuse paid calls once this server process has spent
+                                <amount> (in the units HeyPCB bills in).
   npx @heypcb/mcp login         Sign in: approve a code at heypcb.ai/connect.
         --no-browser            Print the link instead of opening it.
   npx @heypcb/mcp logout        Sign out on this computer (and end that sign-in on HeyPCB).
@@ -64,7 +68,13 @@ function openBrowser(url: string): boolean {
   }
 }
 
-async function main(argv: string[]): Promise<number> {
+async function main(argvIn: string[]): Promise<number> {
+  const spendArg = parseMaxSpend(argvIn);
+  if ("error" in spendArg) {
+    process.stderr.write(spendArg.error + "\n");
+    return 2;
+  }
+  const argv = spendArg.rest;
   const cmd = argv[0];
   if (cmd === "--version" || cmd === "-v") {
     process.stdout.write(VERSION + "\n");
@@ -79,7 +89,7 @@ async function main(argv: string[]): Promise<number> {
 
   if (cmd === undefined || cmd === "serve") {
     const transport = new StdioServerTransport();
-    const running = await startServer(transport, cfg.ok ? { config: cfg.config, store } : { config: null, configRefusal: cfg.refusal, store });
+    const running = await startServer(transport, cfg.ok ? { config: cfg.config, store, maxSpend: spendArg.cap } : { config: null, configRefusal: cfg.refusal, store });
     if (!cfg.ok) process.stderr.write(`[heypcb-mcp] ${cfg.refusal.error} ${cfg.refusal.fix}\n`);
     if (process.stdin.isTTY) process.stderr.write(SERVER_HINT);
     let heard = false;
