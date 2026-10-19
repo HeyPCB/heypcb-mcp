@@ -71,6 +71,8 @@ jobs:
       image: kicad/kicad:${{ matrix.kicad }}
       options: --user root
     steps:
+      - name: Libraries pnpm's standalone binary needs (not in KiCad's images)
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends libatomic1 ca-certificates git
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
