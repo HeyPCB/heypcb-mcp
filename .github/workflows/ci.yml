@@ -6,6 +6,10 @@
 #   routes), the one-file bundle, the built file run over stdio, and what
 #   `npm publish` would upload — on Node 18 (the package's engines floor)
 #   and Node 22.
+# - kicad: check_local and export_local run on the fixture projects with
+#   each supported KiCad's own kicad-cli (KiCad's official images). Its own
+#   job, so the main matrix stays fast; HEYPCB_REQUIRE_KICAD_CLI=1 makes a
+#   missing kicad-cli a failure there instead of a skip.
 # - publish: on a push to main, after `test` passes, `npm publish --access
 #   public --provenance` — only when package.json's version is not on npm
 #   yet (scripts/release-check.mjs: the same version publishes nothing, an
@@ -56,9 +60,35 @@ jobs:
       - name: What npm would upload
         run: node scripts/check-pack.mjs
 
+  kicad:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        kicad: ["8.0", "9.0"]
+    container:
+      image: kicad/kicad:${{ matrix.kicad }}
+      options: --user root
+    steps:
+      - name: Libraries pnpm's standalone binary needs (not in KiCad's images)
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends libatomic1 ca-certificates git
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Install (own lockfile)
+        run: pnpm install --ignore-workspace --frozen-lockfile
+      - run: kicad-cli version
+      - name: check_local and export_local with this kicad-cli
+        env:
+          HEYPCB_REQUIRE_KICAD_CLI: "1"
+        run: pnpm run test:kicad
+
   publish:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [test]
+    needs: [test, kicad]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

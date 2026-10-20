@@ -1,0 +1,14 @@
+{
+  "board": {
+    "design_settings": {}
+  },
+  "meta": {
+    "filename": "blinky.kicad_pro",
+    "version": 1
+  },
+  "schematic": {
+    "legacy_lib_dir": "",
+    "legacy_lib_list": []
+  },
+  "sheets": []
+}

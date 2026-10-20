@@ -186,3 +186,34 @@ export async function writeAtomic(dir: string, name: string, chunks: AsyncIterab
   }
   return { path: finalPath, bytes };
 }
+
+/**
+ * Write `data` to `root/rel` atomically, making the folders on the way. Every
+ * folder must really be inside `root` (no link leads out), and `rel` is a
+ * plain relative POSIX path. For a project's own files and its .heypcb/ folder.
+ */
+export async function writeInside(root: string, rel: string, data: Uint8Array): Promise<string> {
+  const parts = rel.split("/");
+  if (!rel || path.isAbsolute(rel) || rel.includes("\\") || parts.some((p) => p === "" || p === "." || p === "..")) {
+    throw new RefusalError(refusal("unsafe_path", `${rel} is not a plain path inside the project.`, "Nothing was written; report this to HeyPCB."));
+  }
+  const realRoot = await fsp.realpath(root);
+  let dir = realRoot;
+  for (const part of parts.slice(0, -1)) {
+    dir = path.join(dir, part);
+    try {
+      await fsp.mkdir(dir, { mode: 0o755 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+    const real = await fsp.realpath(dir);
+    if (!inside(real, realRoot)) {
+      throw new RefusalError(refusal("symlink_escape", `${parts.slice(0, -1).join("/")} in the project folder is a link to ${real}, outside it.`, "Replace the link with a real folder, then call the tool again."));
+    }
+    dir = real;
+  }
+  const saved = await writeAtomic(dir, parts[parts.length - 1], (async function* () {
+    yield data;
+  })());
+  return saved.path;
+}
