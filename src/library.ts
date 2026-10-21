@@ -29,7 +29,7 @@ import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { anySignal, networkRefusal, responseRefusal } from "./http.ts";
 import { refusal, RefusalError, type Refusal } from "./refusal.ts";
-import { writeInside } from "./safe-path.ts";
+import { pathInside, writeInside } from "./safe-path.ts";
 import { applySplices, atomAt, childrenNamed, ensureTableLib, fileVersion, headOf, mergeSymbols, parseSpans, quote, setProperty, type SpanNode } from "./sexpr.ts";
 import type { ApiContext } from "./workspace.ts";
 
@@ -216,6 +216,27 @@ export async function installParts(ctx: ApiContext, root: string, parts: string[
     }
   }
   if (!assets.length) return out;
+  // Validate existing namespaces and parseable libraries before the first
+  // model, footprint or symbol write. A name collision must not report an
+  // installed id that actually resolves to somebody else's library.
+  const existingSymbols = await readText(await pathInside(root, SYM_FILE));
+  if (existingSymbols !== null) {
+    try {
+      if (headOf(parseSpans(existingSymbols)) !== "kicad_symbol_lib") throw new Error("wrong library kind");
+      mergeSymbols(existingSymbols, assets.flatMap((a) => a.symbols));
+    } catch {
+      throw new RefusalError(refusal("library_unreadable", "The project's existing HeyPCB symbol library cannot be merged.", "Fix the library before installing parts; no files were changed."));
+    }
+  }
+  for (const [file, table, uri] of [["sym-lib-table", "sym_lib_table", `\${KIPRJMOD}/${SYM_FILE}`], ["fp-lib-table", "fp_lib_table", `\${KIPRJMOD}/${FP_DIR}`]] as const) {
+    let plan: ReturnType<typeof ensureTableLib>;
+    try { plan = ensureTableLib(await readText(await pathInside(root, file)), table, { name: LIB, uri, descr: "HeyPCB parts" }); }
+    catch (err) {
+      if (err instanceof RefusalError) throw err;
+      throw new RefusalError(refusal("library_unreadable", `The project's ${file} does not parse.`, "Fix the table before installing parts; no files were changed."));
+    }
+    if (plan.status === "name_taken") throw new RefusalError(refusal("library_namespace_taken", `The project's ${file} uses the HeyPCB name for another library.`, "Choose a distinct library name in KiCad before installing parts; no files were changed."));
+  }
   const write = async (rel: string, data: string | Buffer) => {
     await writeInside(root, rel, typeof data === "string" ? Buffer.from(data, "utf8") : data);
     out.written.push(rel);

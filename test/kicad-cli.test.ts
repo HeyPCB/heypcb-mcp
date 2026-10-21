@@ -12,12 +12,10 @@ import path from "node:path";
 import { Auth } from "../src/auth.ts";
 import { loadConfig } from "../src/config.ts";
 import { CredentialStore } from "../src/credentials.ts";
-import { checkFileVersion, cliCandidates, findKicadCli, readReport, run } from "../src/kicad-cli.ts";
-import { installParts } from "../src/library.ts";
-import { checkLocal, exportLocal } from "../src/local-tools.ts";
+import { checkFileVersion, cliCandidates, findKicadCli, readCheckResult, readReport } from "../src/kicad-cli.ts";
+import { checkLocal, exportLocal, installPartsTool } from "../src/local-tools.ts";
 import { RefusalError } from "../src/refusal.ts";
-import { startFakeHeypcb } from "./fake-heypcb.ts";
-import { configFor, copyFixture, readZip, TEST_KEY, tmpDir } from "./helpers.ts";
+import { copyFixture, readZip, tmpDir } from "./helpers.ts";
 
 const required = process.env.HEYPCB_REQUIRE_KICAD_CLI === "1";
 const cli = await findKicadCli().catch((err) => {
@@ -50,6 +48,34 @@ test("KiCad's DRC and ERC JSON become findings, errors first, with counts", () =
   assert.deepEqual(erc.counts, { errors: 1, warnings: 0 });
   assert.equal(erc.findings[0].type, "pin_not_connected");
   assert.equal(readReport("erc", { sheets: [] }, "b.kicad_sch", "9").passed, true);
+});
+
+test("missing, wrong-kind and malformed KiCad report structures never pass", () => {
+  const clean = { violations: [], unconnected_items: [], schematic_parity: [] };
+  const invalid = (err: unknown) => err instanceof RefusalError && err.refusal.code === "kicad_report_invalid";
+  for (const value of [null, [], {}, { sheets: [] }, { ...clean, violations: null }, { ...clean, unconnected_items: undefined }, { ...clean, schematic_parity: {} }, { ...clean, violations: [null] }, { ...clean, violations: [{ type: "clearance", description: "Short", severity: "unexpected" }] }]) {
+    assert.throws(() => readReport("drc", value, "b.kicad_pcb", "9"), invalid);
+  }
+  for (const value of [{}, clean, { sheets: [null] }, { sheets: [{ path: "/", violations: null }] }, { sheets: [{ path: "/", violations: [{ type: "pin_not_driven", description: "No driver", severity: "unexpected" }] }] }]) {
+    assert.throws(() => readReport("erc", value, "b.kicad_sch", "9"), invalid);
+  }
+  assert.equal(readReport("drc", clean, "b.kicad_pcb", "9").passed, true);
+  assert.equal(readReport("erc", { sheets: [{ path: "/", violations: [] }] }, "b.kicad_sch", "9").passed, true);
+});
+
+test("failed CLI, missing output and invalid JSON cannot become passing local checks", () => {
+  const fakeCli = { bin: "kicad-cli", version: "9.0.1", major: 9 };
+  const clean = JSON.stringify({ violations: [], unconnected_items: [], schematic_parity: [] });
+  const result = { code: 0, stdout: "", stderr: "" };
+  const failed = (err: unknown) => err instanceof RefusalError && err.refusal.code === "kicad_cli_failed";
+  const invalid = (err: unknown) => err instanceof RefusalError && err.refusal.code === "kicad_report_invalid";
+  assert.throws(() => readCheckResult("drc", { ...result, code: 3, stderr: "Cannot load board" }, clean, "b.kicad_pcb", fakeCli), failed);
+  assert.throws(() => readCheckResult("drc", result, null, "b.kicad_pcb", fakeCli), failed);
+  assert.throws(() => readCheckResult("drc", result, "{", "b.kicad_pcb", fakeCli), invalid);
+  assert.throws(() => readCheckResult("drc", result, "{}", "b.kicad_pcb", fakeCli), invalid);
+  const withViolation = JSON.stringify({ violations: [{ description: "Short", type: "shorting_items", severity: "error", items: [] }], unconnected_items: [], schematic_parity: [] });
+  assert.equal(readCheckResult("drc", result, withViolation, "b.kicad_pcb", fakeCli).passed, false, "a completed native check still reports its violations");
+  assert.equal(readCheckResult("drc", result, clean, "b.kicad_pcb", fakeCli).passed, true);
 });
 
 test("kicad-cli is looked for on PATH first, then where KiCad installs it", async () => {
@@ -117,25 +143,31 @@ test("export_local cpl and bom write CSVs", needsKicad, async () => {
   assert.match(await fsp.readFile((bom.structuredContent as { path: string }).path, "utf8"), /R1/);
 });
 
-test("the libraries install_parts writes load in KiCad", needsKicad, async () => {
-  const fake = await startFakeHeypcb({});
-  try {
-    const home = tmpDir();
-    const root = await copyFixture("blinky2", home);
-    const config = configFor(fake.mcpUrl, { HEYPCB_API_KEY: TEST_KEY });
-    await installParts({ config, auth: new Auth(config, new CredentialStore(path.join(home, ".config", "heypcb", "c.json"))) }, root, ["C2040", "C1525"]);
-    const out = path.join(home, "svg");
-    await fsp.mkdir(out);
-    const sym = await run(cli!.bin, ["sym", "export", "svg", "-o", out, path.join(root, "heypcb.kicad_sym")]);
-    assert.equal(sym.code, 0, sym.stderr);
-    const fp = await run(cli!.bin, ["fp", "export", "svg", "-o", out, path.join(root, "heypcb.pretty")]);
-    assert.equal(fp.code, 0, fp.stderr);
-    const plotted = await fsp.readdir(out);
-    // KiCad 8 lowercases the symbols' file names (rp2040.svg), 9 and later keep the case and add the unit (RP2040_unit1.svg).
-    for (const name of ["C_0402", "C_100nF", "QFN-56_7x7mm", "RP2040"]) {
-      assert.ok(plotted.some((f) => f.toLowerCase().startsWith(name.toLowerCase()) && f.endsWith(".svg")), `${name} plotted: ${plotted.join(", ")}`);
+test("unavailable public installer refuses before path/auth/network access and preserves project files", async () => {
+  const home = tmpDir();
+  const root = await copyFixture("blinky2", home);
+  const snapshot = async (dir: string): Promise<Array<[string, string]>> => {
+    const out: Array<[string, string]> = [];
+    for (const entry of (await fsp.readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...await snapshot(file));
+      else out.push([path.relative(root, file), (await fsp.readFile(file)).toString("hex")]);
     }
-  } finally {
-    await fake.close();
-  }
+    return out;
+  };
+  const before = await snapshot(root);
+  const context = ctx(home);
+  let authOrNetworkCalls = 0;
+  context.auth.bearer = async () => { authOrNetworkCalls++; throw new Error("Installer must refuse before authentication"); };
+  context.auth.fetch = async () => { authOrNetworkCalls++; throw new Error("Installer must not request unavailable assets"); };
+  let pathReads = 0;
+  const res = await installPartsTool(context, { get path() { pathReads++; return root; }, parts: ["C2040", "C1525"] });
+  assert.equal(res.isError, true);
+  const body = res.structuredContent as { code: string; written: boolean; retryable: boolean };
+  assert.equal(body.code, "parts_assets_unsupported");
+  assert.equal(body.written, false);
+  assert.equal(body.retryable, false);
+  assert.equal(pathReads, 0, "unsupported installation must not inspect or create the target path");
+  assert.equal(authOrNetworkCalls, 0);
+  assert.deepEqual(await snapshot(root), before);
 });

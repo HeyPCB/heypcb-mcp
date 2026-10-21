@@ -22,7 +22,6 @@ import { projectUrl, type Config } from "./config.ts";
 import { anySignal, chunksOf, networkRefusal, neverSent, responseRefusal, sleep } from "./http.ts";
 import { runCheck, runExport, LOCAL_EXPORT_KINDS, type LocalExportKind } from "./kicad-cli.ts";
 import { collectProject, locateProject, MAX_PROJECT_BYTES, type Collection } from "./kicad-files.ts";
-import { installParts } from "./library.ts";
 import { okResult, refusal, RefusalError, refusalResult } from "./refusal.ts";
 import { freeName, resolveTargetDir, safeFileName, writeAtomic } from "./safe-path.ts";
 import { FileApi, ignoreInGit, keepLocal, listBackups, pull, push, restore, Workspace, WORKSPACE_DIR, Workspaces } from "./workspace.ts";
@@ -34,7 +33,7 @@ const EXPORT_EXT: Record<ExportKind, string> = { gerbers: ".zip", kicad: ".zip",
 
 const PATH_PROP = { type: "string", description: "The KiCad project's folder, or its .kicad_pro / .kicad_pcb / .kicad_sch file. Absolute, or starting with ~/." } as const;
 
-export const LOCAL_TOOLS: Tool[] = [
+const ALL_LOCAL_TOOLS: Tool[] = [
   {
     name: "open_kicad_project",
     title: "Open a KiCad project",
@@ -169,6 +168,9 @@ export const LOCAL_TOOLS: Tool[] = [
   },
 ];
 
+// The current public API has no parts-assets route. Retain the library
+// implementation, but do not advertise a tool whose dependency is absent.
+export const LOCAL_TOOLS = ALL_LOCAL_TOOLS.filter((t) => t.name !== "install_parts");
 export const LOCAL_TOOL_NAMES = new Set(LOCAL_TOOLS.map((t) => t.name));
 
 /** `workspaces` is the server's one registry (it holds each folder's lock); a caller without one gets its own. */
@@ -415,24 +417,8 @@ export function saveExport(ctx: LocalContext, args: Record<string, unknown>, sig
   });
 }
 
-function partList(raw: unknown): string[] | null {
-  if (!Array.isArray(raw) || !raw.length || raw.length > 50) return null;
-  const out = raw.map((p) => (typeof p === "string" ? p.trim() : ""));
-  return out.every((p) => /^[A-Za-z0-9._:-]{1,64}$/.test(p)) ? out : null;
-}
-
 export function installPartsTool(ctx: LocalContext, args: Record<string, unknown>, signal?: AbortSignal): Promise<CallToolResult> {
-  return guarded(async () => {
-    await ctx.auth.bearer();
-    const parts = partList(args.parts);
-    if (!parts) return refusalResult(refusal("bad_parts", "`parts` must be 1–50 LCSC codes or HeyPCB part ids.", "Pass the ids search_parts or get_part returned, e.g. [\"C2040\"]."));
-    const { root } = await locateProject(String(args.path ?? ""), ctx.home);
-    const r = await installParts(ctx, root, parts, signal);
-    if (!r.installed.length) {
-      return refusalResult(refusal("nothing_installed", "None of the parts could be installed.", "Check the ids with get_part, then call install_parts again.", { failed: r.failed }));
-    }
-    return okResult({ root, ...r });
-  });
+  return Promise.resolve(refusalResult(refusal("parts_assets_unsupported", "The current HeyPCB API does not serve installable part assets. Nothing was installed.", "Keep the project's existing libraries; use downloaded KiCad project files until part assets are supported.", { written: false, retryable: false })));
 }
 
 /** The board and root schematic of the project a path names. */

@@ -84,6 +84,47 @@ test("passes a refusal through exactly as the remote server sent it", async () =
   assert.deepEqual(res.content, [{ type: "text", text: JSON.stringify(REFUSAL) }]);
 });
 
+for (const status of [undefined, 502]) {
+  test(`a lost write reply (${status ?? "disconnect"}) requires readback and is never replayed`, async () => {
+    const { client, fake } = await setup({ HEYPCB_API_KEY: TEST_KEY }, { acceptTokens: new Set([TEST_KEY]), mcpCallFault: { name: "slow", status } });
+    const res = await client.callTool({ name: "slow", arguments: { project: "prj_1" } });
+    const r = res.structuredContent as { code: string; retryable: boolean; written?: boolean; fix: string; inspectWith: unknown };
+    assert.equal(r.code, "write_outcome_unknown");
+    assert.equal(r.retryable, false);
+    assert.equal(r.written, undefined, "the caller cannot claim the write did not happen");
+    assert.match(r.fix, /Do not repeat slow/);
+    assert.deepEqual(r.inspectWith, { tool: "get_design_summary", args: { project: "prj_1" } });
+    assert.equal(fake.rpc.filter((m) => m.method === "tools/call" && m.params?.name === "slow").length, 1);
+  });
+}
+
+test("a lost read reply remains retryable", async () => {
+  const { client } = await setup({ HEYPCB_API_KEY: TEST_KEY }, { acceptTokens: new Set([TEST_KEY]), mcpCallFault: { name: "echo" } });
+  const res = await client.callTool({ name: "echo", arguments: { text: "read" } });
+  const r = res.structuredContent as { code: string; retryable: boolean };
+  assert.equal(r.code, "remote_unreachable");
+  assert.equal(r.retryable, true);
+});
+
+test("a write timeout requires readback even though the transport cancels its wait", async () => {
+  const { client, fake } = await setup({ HEYPCB_API_KEY: TEST_KEY, HEYPCB_MCP_TIMEOUT_MS: "1000" }, { acceptTokens: new Set([TEST_KEY]) });
+  const res = await client.callTool({ name: "slow", arguments: { project: "prj_1", steps: 0 } });
+  const r = res.structuredContent as { code: string; cause: string; retryable: boolean };
+  assert.equal(r.code, "write_outcome_unknown");
+  assert.equal(r.cause, "remote_timeout");
+  assert.equal(r.retryable, false);
+  assert.equal(fake.rpc.filter((m) => m.method === "tools/call" && m.params?.name === "slow").length, 1);
+});
+
+test("a lost project-creating call says to find the project before creating another", async () => {
+  const { client } = await setup({ HEYPCB_API_KEY: TEST_KEY }, { acceptTokens: new Set([TEST_KEY]), mcpCallFault: { name: "slow" } });
+  const res = await client.callTool({ name: "slow", arguments: {} });
+  const r = res.structuredContent as { code: string; fix: string; inspectWith: unknown };
+  assert.equal(r.code, "write_outcome_unknown");
+  assert.match(r.fix, /find any project it created/);
+  assert.deepEqual(r.inspectWith, { tool: "list_projects", args: {} });
+});
+
 test("passes the remote server's JSON-RPC error through as the same error", async () => {
   const { client } = await setup({ HEYPCB_API_KEY: TEST_KEY }, { acceptTokens: new Set([TEST_KEY]) });
   await assert.rejects(client.callTool({ name: "bad_params", arguments: {} }), (err: unknown) => {

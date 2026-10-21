@@ -13,7 +13,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { CredentialStore } from "../src/credentials.ts";
 import { startServer } from "../src/server.ts";
-import { WORKSPACE_DIR } from "../src/workspace.ts";
+import { Auth } from "../src/auth.ts";
+import { FileApi, Workspace, pull, ignoreInGit, WORKSPACE_DIR } from "../src/workspace.ts";
 import { startFakeHeypcb, type FakeOptions } from "./fake-heypcb.ts";
 import { configFor, copyFixture, TEST_KEY, tmpDir } from "./helpers.ts";
 
@@ -37,13 +38,14 @@ async function setup(fakeOpts: FakeOptions = {}, serveOpts: { maxSpend?: number 
   });
   const call = async (name: string, args: Record<string, unknown> = {}, meta?: Record<string, unknown>) =>
     (await client.callTool({ name, arguments: args, ...(meta ? { _meta: meta } : {}) })) as CallToolResult;
-  return { fake, home, client, call, running };
+  const config = configFor(fake.mcpUrl, { HEYPCB_API_KEY: TEST_KEY });
+  return { fake, home, client, call, running, api: new FileApi({ config, auth: new Auth(config, store) }) };
 }
 
 const sc = (r: CallToolResult) => r.structuredContent as Record<string, any>;
 const read = (root: string, rel: string) => fsp.readFile(path.join(root, ...rel.split("/")), "utf8");
-const puts = (fake: { requests: Array<{ method: string; path: string; body: Buffer }> }) =>
-  fake.requests.filter((r) => r.method === "PUT" && r.path.endsWith("/files")).map((r) => JSON.parse(r.body.toString("utf8")) as { baseRevision: string; files: Array<{ path: string }>; delete: string[] });
+const puts = (fake: { requests: Array<{ method: string; path: string; body: Buffer; sync?: { baseRevision: string; files: Array<{ path: string }>; delete: string[] } }> }) =>
+  fake.requests.filter((r) => r.method === "PUT" && r.path.endsWith("/files")).map((r) => r.sync!);
 
 async function bound(fakeOpts: FakeOptions = {}, serveOpts: { maxSpend?: number } = {}) {
   const s = await setup(fakeOpts, serveOpts);
@@ -82,7 +84,8 @@ test("sync round trip: an edit here goes up before the call, HeyPCB's change com
   assert.equal(res.isError, undefined, JSON.stringify(res.structuredContent));
   const sent = puts(fake);
   assert.equal(sent.length, 1);
-  assert.deepEqual(sent[0].files.map((f) => f.path), ["blinky.kicad_pcb"], "only the changed file goes up");
+  assert.ok(sent[0].files.some((f) => f.path === "blinky.kicad_pcb"));
+  assert.ok(sent[0].files.some((f) => f.path === "sub/power.kicad_sch"), "replace sync carries the complete snapshot");
 
   const now = await read(root, "blinky.kicad_pcb");
   assert.match(now, /local edit/, "the local edit is part of what came back");
@@ -192,15 +195,18 @@ test("restore_local lists the backups and puts one back, backing up what it repl
   assert.equal(sc(missing).code, "no_backup");
 });
 
-test("add_parts on a bound folder installs the parts into the project's libraries", async () => {
-  const { root, id, call } = await bound();
+test("unavailable part installation is not advertised or allowed to mutate libraries", async () => {
+  const { root, id, call, client } = await bound();
+  assert.ok(!(await client.listTools()).tools.some((t) => t.name === "install_parts"));
+  const original = await read(root, "sym-lib-table");
+  const refused = await call("install_parts", { path: root, parts: ["C2040"] });
+  assert.equal(sc(refused).code, "parts_assets_unsupported");
+  assert.equal(sc(refused).written, false);
   const res = await call("add_parts", { project: id, parts: ["C2040"] });
-  assert.equal(res.isError, undefined, JSON.stringify(res.structuredContent));
-  const local = (res._meta as any).heypcb.local;
-  assert.deepEqual(local.installed.map((i: { part: string }) => i.part), ["C2040"]);
-  assert.match(await read(root, "heypcb.kicad_sym"), /\(symbol "RP2040"/);
-  assert.match(await read(root, "heypcb.pretty/QFN-56_7x7mm.kicad_mod"), /\$\{KIPRJMOD\}\/heypcb\.3dshapes\/QFN-56_7x7mm\.step/);
-  assert.match(await read(root, "sym-lib-table"), /\(name "blinky"\)[\s\S]*\(name "heypcb"\)/, "the existing library is kept");
+  assert.equal(res.isError, undefined);
+  assert.equal((res._meta as any).heypcb.local.install_failed[0].code, "parts_assets_unsupported");
+  assert.equal(await read(root, "sym-lib-table"), original);
+  await assert.rejects(fsp.stat(path.join(root, "heypcb.kicad_sym")));
 });
 
 test("a binding made in an earlier session still syncs: the index finds the folder by project id", async () => {
@@ -237,4 +243,85 @@ test(".heypcbignore keeps files local", async () => {
   const res = await s.call("open_kicad_project", { path: root });
   assert.ok(!sc(res).uploaded.files.includes("sub/power.kicad_sch"));
   assert.ok(sc(res).skipped.some((x: { path: string; reason: string }) => x.path === "sub/power.kicad_sch" && x.reason === "heypcbignore"));
+});
+
+
+test("sync uses the real manifest, file-path and multipart snapshot contract", async () => {
+  const { fake, root, id, call } = await bound();
+  await fsp.writeFile(path.join(root, "blinky.kicad_pcb"), "(kicad_pcb (local))\n");
+  assert.equal((await call("edit_board", { project: id })).isError, undefined);
+  assert.ok(fake.requests.some((r) => r.path.endsWith("/files/manifest")));
+  const put = fake.requests.find((r) => r.method === "PUT")!;
+  assert.match(String(put.headers["content-type"]), /^multipart\/form-data/);
+  assert.ok(put.sync!.files.length > 1, "replace carries unchanged sheets and libraries too");
+  assert.ok(!fake.requests.some((r) => r.path.endsWith("/files/content")));
+  const legacy = await fetch(`${fake.url}/v1/projects/${id}/files`, { method: "PUT", headers: { authorization: `Bearer ${TEST_KEY}`, "content-type": "application/json" }, body: "{}" });
+  assert.equal(legacy.status, 400);
+  assert.equal((await legacy.json() as {code:string}).code, "sync_body_unreadable");
+});
+
+test("a committed sync whose reply drops is read back, never automatically resent", async () => {
+  const { fake, root, id, call } = await bound({ dropPutReply: true });
+  await fsp.writeFile(path.join(root, "blinky.kicad_pcb"), "(kicad_pcb (local))\n");
+  assert.equal((await call("read_board", { project: id })).isError, undefined);
+  assert.equal(puts(fake).length, 1);
+  assert.equal(fake.projects.get(id)!.files.get("blinky.kicad_pcb")!.toString(), "(kicad_pcb (local))\n");
+});
+
+test("an unreadable outcome refuses further work and preserves the logical sync key", async () => {
+  const { fake, root, id, call } = await bound({ dropPutReply: true, manifestAfterPutFault: true });
+  await fsp.writeFile(path.join(root, "blinky.kicad_pcb"), "(kicad_pcb (local))\n");
+  const lost = await call("edit_board", { project: id });
+  assert.equal(sc(lost).code, "write_outcome_unknown");
+  assert.equal(sc(lost).written, null);
+  assert.equal(sc(lost).retryable, false);
+  assert.equal(puts(fake).length, 1);
+  assert.equal(fake.rpc.filter((r) => r.method === "tools/call").length, 0, "no design call follows an unknown sync");
+  fake.opts.dropPutReply = false; fake.opts.manifestAfterPutFault = false;
+  assert.equal((await call("read_board", { project: id })).isError, undefined);
+  const keys = fake.requests.filter((r) => r.method === "PUT").map((r) => r.headers["idempotency-key"]);
+  assert.equal(keys.length, 2); assert.equal(keys[0], keys[1]);
+  assert.equal(fake.projects.get(id)!.revision, 2, "explicit recovery reuses the committed sync rather than writing again");
+});
+
+test("a KiCad save during download is kept beside the incoming server copy", async () => {
+  let root = "";
+  const s = await bound({ duringDownload: async (rel) => {
+    if (rel === "blinky.kicad_pcb") await fsp.writeFile(path.join(root, rel), "(kicad_pcb (saved during download))\n");
+  }});
+  root = s.root;
+  const result = await s.call("edit_board", { project: s.id, text: "(server)" });
+  assert.equal(sc(result).code, "kicad_saved_during_call");
+  assert.match(await read(root, "blinky.kicad_pcb"), /saved during download/);
+  assert.match(await read(root, "blinky.kicad_pcb.heypcb-new"), /server/);
+});
+
+test("pull deletion refuses a parent symlink before any project file changes", async () => {
+  const { root, fake, id, api, home } = await bound();
+  const outside = path.join(home, "outside"); await fsp.mkdir(outside);
+  await fsp.writeFile(path.join(outside, "power.kicad_sch"), "external bytes");
+  await fsp.rm(path.join(root, "sub"), {recursive:true}); await fsp.symlink(outside, path.join(root, "sub"), "dir");
+  fake.projects.get(id)!.files.delete("sub/power.kicad_sch"); fake.projects.get(id)!.revision++;
+  const board = await read(root, "blinky.kicad_pcb");
+  const ws = await Workspace.load(root);
+  await assert.rejects(pull(ws!, api), (e:any) => e.refusal?.code === "symlink_escape");
+  assert.equal(await fsp.readFile(path.join(outside, "power.kicad_sch"), "utf8"), "external bytes");
+  assert.equal(await read(root, "blinky.kicad_pcb"), board);
+});
+
+test("malicious persisted paths and a linked gitignore are refused without outside writes", async () => {
+  const { root, home } = await bound();
+  const stateFile = path.join(root, WORKSPACE_DIR, "workspace.json"); const original = await fsp.readFile(stateFile, "utf8");
+  for (const field of ["files", "conflicts"]) {
+    const state = JSON.parse(original);
+    if (field === "files") state.files["../external.kicad_sch"] = {local:"x",remote:"x"};
+    else state.conflicts = ["../external.kicad_sch"];
+    await fsp.writeFile(stateFile, JSON.stringify(state));
+    await assert.rejects(Workspace.load(root), (e:any) => e.refusal?.code === "workspace_unreadable");
+  }
+  await fsp.writeFile(stateFile, original);
+  const outside = path.join(home,"outside-ignore"); await fsp.writeFile(outside,"keep");
+  await fsp.rm(path.join(root,".gitignore")); await fsp.symlink(outside,path.join(root,".gitignore"));
+  await assert.rejects(ignoreInGit(root), (e:any) => e.refusal?.code === "symlink_escape");
+  assert.equal(await fsp.readFile(outside,"utf8"),"keep");
 });

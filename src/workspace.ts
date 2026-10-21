@@ -23,11 +23,11 @@
  * because the server may store a file normalised; comparing each side with
  * its own last-seen hash never mistakes that for an edit.
  *
- * The server's file API, as this client uses it:
- *   GET  /v1/projects/{id}/files                 → { ok, revision, files: [{ path, sha256, bytes }] }
- *   GET  /v1/projects/{id}/files/content?path=…  → the file's bytes
- *   PUT  /v1/projects/{id}/files                 { baseRevision, files: [{ path, sha256, contentBase64 }], delete: [path] }
- *                                                → { ok, revision, files } | 409 { ok:false, code, revision }
+ * The current file API:
+ *   GET /v1/projects/{id}/files/manifest → { ok, revision, files }
+ *   GET /v1/projects/{id}/files/{path} → file bytes
+ *   PUT /v1/projects/{id}/files → multipart zip + manifest + mode=replace
+ * A complete snapshot preserves unchanged files; baseRevision guards it.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
@@ -37,7 +37,8 @@ import type { Config } from "./config.ts";
 import { anySignal, networkRefusal, responseRefusal } from "./http.ts";
 import { collectProject } from "./kicad-files.ts";
 import { refusal, RefusalError, type Refusal } from "./refusal.ts";
-import { writeInside } from "./safe-path.ts";
+import { pathInside, writeInside } from "./safe-path.ts";
+import { buildZip } from "./zip.ts";
 
 export const WORKSPACE_DIR = ".heypcb";
 export const WORKSPACE_FILE = "workspace.json";
@@ -57,6 +58,7 @@ export type WorkspaceState = {
   /** Files with a `<file>.heypcb-new` beside them, waiting to be resolved. */
   conflicts: string[];
   boundAt: string;
+  pendingSync?: { key: string; signature: string };
 };
 
 export type ApiContext = { config: Config; auth: Auth };
@@ -97,8 +99,9 @@ export class Workspace {
   static async load(root: string): Promise<Workspace | null> {
     let text: string;
     try {
-      text = await fsp.readFile(Workspace.file(root), "utf8");
-    } catch {
+      text = await fsp.readFile(await pathInside(root, `${WORKSPACE_DIR}/${WORKSPACE_FILE}`), "utf8");
+    } catch (err) {
+      if (err instanceof RefusalError) throw err;
       return null;
     }
     let s: WorkspaceState;
@@ -107,7 +110,10 @@ export class Workspace {
     } catch {
       s = {} as WorkspaceState;
     }
-    if (s?.version !== 1 || typeof s.projectId !== "string" || typeof s.apiBase !== "string" || typeof s.stem !== "string" || !s.files || typeof s.files !== "object") {
+    if (s?.version !== 1 || typeof s.projectId !== "string" || !s.projectId || typeof s.apiBase !== "string" || typeof s.stem !== "string" || !safeRel(s.stem) || s.stem.includes("/") || !s.files || typeof s.files !== "object" || Array.isArray(s.files)
+      || Object.entries(s.files).some(([rel, f]) => !safeRel(rel) || !f || typeof f.local !== "string" || typeof f.remote !== "string")
+      || (s.conflicts !== undefined && (!Array.isArray(s.conflicts) || s.conflicts.some((rel) => typeof rel !== "string" || !safeRel(rel))))
+      || (s.pendingSync !== undefined && (!s.pendingSync || typeof s.pendingSync.key !== "string" || typeof s.pendingSync.signature !== "string"))) {
       throw new RefusalError(
         refusal("workspace_unreadable", `${path.join(WORKSPACE_DIR, WORKSPACE_FILE)} in ${root} is not a HeyPCB workspace file this version reads.`, "Call open_kicad_project again with `rebind: true` to bind the folder afresh (it uploads the project as a new HeyPCB project).")
       );
@@ -121,6 +127,7 @@ export class Workspace {
   }
 
   abs(rel: string): string {
+    if (!safeRel(rel)) throw new RefusalError(refusal("unsafe_path", "A tracked workspace path is not project-relative.", "Nothing was changed; reopen a valid KiCad project."));
     return path.join(this.root, ...rel.split("/"));
   }
 }
@@ -138,10 +145,10 @@ export async function ignoreInGit(root: string): Promise<boolean> {
       dir = up;
     }
   }
-  const file = path.join(root, ".gitignore");
+  const file = await pathInside(root, ".gitignore");
   const text = await fsp.readFile(file, "utf8").catch(() => "");
   if (text.split(/\r?\n/).some((l) => /^\/?\.heypcb\/?$/.test(l.trim()))) return false;
-  await fsp.writeFile(file, (text && !text.endsWith("\n") ? text + "\n" : text) + `${WORKSPACE_DIR}/\n`);
+  await writeInside(root, ".gitignore", Buffer.from((text && !text.endsWith("\n") ? text + "\n" : text) + `${WORKSPACE_DIR}/\n`));
   return true;
 }
 
@@ -151,8 +158,8 @@ export type Listing = { revision: string; files: RemoteFile[] };
 function listingOf(body: unknown): Listing | null {
   const b = body as { revision?: unknown; files?: unknown } | null;
   if (!b || typeof b.revision !== "string" || !Array.isArray(b.files)) return null;
-  const files = b.files.filter((f): f is RemoteFile => !!f && typeof f.path === "string" && typeof f.sha256 === "string");
-  return { revision: b.revision, files };
+  if (b.files.some((f) => !f || typeof f.path !== "string" || !safeRel(f.path) || typeof f.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(f.sha256))) return null;
+  return { revision: b.revision, files: b.files as RemoteFile[] };
 }
 
 /** The REST half of the file API. Every failure is a RefusalError. */
@@ -173,7 +180,7 @@ export class FileApi {
   }
 
   async list(id: string, signal?: AbortSignal): Promise<Listing> {
-    const res = await this.fetch(this.url(id), { headers: { accept: "application/json" } }, "the project's file list", signal);
+    const res = await this.fetch(this.url(id, "/manifest"), { headers: { accept: "application/json" } }, "the project's file list", signal);
     if (!res.ok) throw new RefusalError(await responseRefusal(res, "the project's file list"));
     const listing = listingOf(await res.json().catch(() => null));
     if (!listing) throw new RefusalError(refusal("bad_answer", "HeyPCB answered the file list in a shape this version does not read.", "Update with `npx -y @heypcb/mcp@latest`, then call the tool again."));
@@ -181,33 +188,54 @@ export class FileApi {
   }
 
   async download(id: string, rel: string, signal?: AbortSignal): Promise<Buffer> {
-    const res = await this.fetch(this.url(id, `/content?path=${encodeURIComponent(rel)}`), { headers: { accept: "*/*" } }, `${rel}`, signal, 300_000);
+    if (!safeRel(rel)) throw new RefusalError(refusal("unsafe_path", "The file path is not project-relative.", "Read a path from the project's manifest."));
+    const res = await this.fetch(this.url(id, `/${rel.split("/").map(encodeURIComponent).join("/")}`), { headers: { accept: "*/*" } }, `${rel}`, signal, 300_000);
     if (!res.ok) throw new RefusalError(await responseRefusal(res, `the file ${rel}`));
     return Buffer.from(await res.arrayBuffer());
   }
 
   /** Upload changed files and deletions against `baseRevision`. A 409 comes back as `conflict`, not thrown. */
-  async put(id: string, baseRevision: string | null, files: Array<{ path: string; data: Buffer; sha256: string }>, del: string[], signal?: AbortSignal): Promise<{ conflict: false; listing: Listing } | { conflict: true; revision: string | null }> {
-    const body = JSON.stringify({
-      baseRevision,
-      files: files.map((f) => ({ path: f.path, sha256: f.sha256, contentBase64: f.data.toString("base64") })),
-      delete: del,
-    });
-    const res = await this.fetch(this.url(id), { method: "PUT", headers: { "content-type": "application/json", accept: "application/json", "idempotency-key": randomUUID() }, body }, "the upload of your changes", signal, 300_000);
+  async put(id: string, baseRevision: string | null, files: Array<{ path: string; data: Buffer; sha256: string }>, del: string[], signal?: AbortSignal, key: string = randomUUID()): Promise<{ conflict: false; listing: Listing } | { conflict: true; revision: string | null }> {
+    const board = files.filter((f) => f.path.endsWith(".kicad_pcb") && !f.path.includes("/"));
+    if (board.length !== 1) throw new RefusalError(refusal("no_single_board", "A sync needs exactly one board file.", "Keep one board in the project folder before syncing."));
+    const form = new FormData();
+    form.set("manifest", JSON.stringify({ baseRevision, board: { path: board[0].path, sha256: board[0].sha256, source: "disk" }, files: files.map((f) => ({ path: f.path, sha256: f.sha256 })), kicadVersion: null }));
+    form.set("mode", "replace");
+    form.set("file", new Blob([new Uint8Array(buildZip(files))], { type: "application/zip" }), "project.zip");
+    const recover = async (): Promise<{ conflict: false; listing: Listing }> => {
+      const seen = await this.list(id, signal).catch(() => null);
+      if (seen && seen.files.length === files.length && files.every((f) => seen.files.some((s) => s.path === f.path && s.sha256 === f.sha256)) && del.every((p) => !seen.files.some((f) => f.path === p))) return { conflict: false, listing: seen };
+      throw new RefusalError(refusal("write_outcome_unknown", "The sync reply was lost; the project may already have changed on HeyPCB.", "Do not upload again blindly. Read the project's manifest and resolve which copy to keep first.", { written: null, retryable: false, project: id, idempotencyKey: key }));
+    };
+    let res: Response;
+    try {
+      res = await this.ctx.auth.fetch(this.url(id), { method: "PUT", headers: { accept: "application/json", "idempotency-key": key }, body: form, signal: signal ? anySignal(signal, 300_000) : AbortSignal.timeout(300_000) });
+    } catch (err) {
+      if (err instanceof RefusalError) throw err;
+      return recover();
+    }
     if (res.status === 409) {
       const b = (await res.json().catch(() => null)) as { revision?: unknown } | null;
-      return { conflict: true, revision: typeof b?.revision === "string" ? b.revision : null };
+      const r = b as { revision?: unknown; serverRevision?: unknown };
+      return { conflict: true, revision: typeof r?.serverRevision === "string" ? r.serverRevision : typeof r?.revision === "string" ? r.revision : null };
     }
-    if (!res.ok) throw new RefusalError(await responseRefusal(res, "the upload of your changes"));
-    const listing = listingOf(await res.json().catch(() => null));
-    if (!listing) throw new RefusalError(refusal("bad_answer", "HeyPCB answered the upload of your changes in a shape this version does not read.", "Update with `npx -y @heypcb/mcp@latest`, then call the tool again."));
+    if (!res.ok) {
+      const said = await res.clone().json().catch(() => null) as { written?: unknown } | null;
+      if (res.status >= 500 && said?.written !== false) return recover();
+      throw new RefusalError(await responseRefusal(res, "the upload of your changes"));
+    }
+    // A sync response names its revision, not a file list. Read back the
+    // actual manifest, including any normalization, before recording a base.
+    const body = await res.json().catch(() => null) as { revision?: unknown } | null;
+    const listing = await this.list(id, signal).catch(() => null);
+    if (!listing || typeof body?.revision !== "string" || listing.revision !== body.revision) return recover();
     return { conflict: false, listing };
   }
 }
 
 /** A server path that is safe to write under the project: relative, no `..`, not into .heypcb/ or .git/. */
 export function safeRel(rel: string): boolean {
-  if (!rel || rel.length > 1024 || /[\0\\]/.test(rel) || rel.startsWith("/") || /^[A-Za-z]:/.test(rel)) return false;
+  if (!rel || rel.length > 1024 || /[\x00-\x1f\x7f\\]/.test(rel) || rel.startsWith("/") || /^[A-Za-z]:/.test(rel)) return false;
   const parts = rel.split("/");
   if (parts.some((p) => p === "" || p === "." || p === "..")) return false;
   return parts[0] !== WORKSPACE_DIR && parts[0] !== ".git";
@@ -216,9 +244,10 @@ export function safeRel(rel: string): boolean {
 async function readIfFile(p: string): Promise<Buffer | null> {
   try {
     const st = await fsp.lstat(p);
-    if (!st.isFile()) return null;
+    if (!st.isFile()) throw new RefusalError(refusal("workspace_unreadable", "A tracked workspace file is not a regular file.", "Keep regular project files in the workspace; nothing was replaced."));
     return await fsp.readFile(p);
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     return null;
   }
 }
@@ -264,16 +293,30 @@ export async function push(ws: Workspace, api: FileApi, opts: { force?: boolean;
   const del: string[] = [];
   for (const rel of Object.keys(ws.state.files)) if (!local.has(rel) && !(await exists(ws.abs(rel)))) del.push(rel);
   if (!put.length && !del.length && !opts.force) return { pushed: [], deleted: [] };
-  const base = opts.force ? (await api.list(ws.state.projectId, opts.signal)).revision : ws.state.revision;
-  if (opts.force && !put.length && !del.length) {
-    ws.state.revision = base;
-    await ws.save();
-    return { pushed: [], deleted: [] };
+  const latest = opts.force ? await api.list(ws.state.projectId, opts.signal) : null;
+  const base = latest ? latest.revision : ws.state.revision;
+  // The current endpoint replaces a complete snapshot. In an explicit
+  // keep-local resolution only locally changed files win; preserve other
+  // web changes while constructing that complete snapshot.
+  let sentFiles: Array<{ path: string; data: Buffer; sha256: string }> = col.files;
+  if (latest) {
+    const changed = new Set(put.map((f) => f.path));
+    const merged = new Map<string, { path: string; data: Buffer; sha256: string }>(put.map((f) => [f.path, f]));
+    for (const f of latest.files) if (!changed.has(f.path) && !del.includes(f.path)) {
+      const data = await api.download(ws.state.projectId, f.path, opts.signal);
+      if (sha256(data) !== f.sha256) throw new RefusalError(refusal("download_corrupt", "A sync source changed while it was downloaded.", "Read the project again before syncing.", { retryable: true }));
+      merged.set(f.path, { path: f.path, data, sha256: f.sha256 });
+    }
+    sentFiles = [...merged.values()];
   }
-  const r = await api.put(ws.state.projectId, base, put.map((f) => ({ path: f.path, data: f.data, sha256: f.sha256 })), del, opts.signal);
+  const signature = sha256(Buffer.from(JSON.stringify({ base, files: sentFiles.map((f) => [f.path, f.sha256]), del })));
+  if (ws.state.pendingSync?.signature !== signature) ws.state.pendingSync = { key: randomUUID(), signature };
+  await ws.save();
+  const r = await api.put(ws.state.projectId, base, sentFiles, del, opts.signal, ws.state.pendingSync.key);
   if (r.conflict) {
     throw new RefusalError(conflictRefusal(ws, `HeyPCB's copy of this project changed (revision ${r.revision ?? "?"}) since this folder last synced (${ws.state.revision ?? "?"}), and files here changed too: ${[...put.map((f) => f.path), ...del].join(", ")}. Nothing was overwritten.`));
   }
+  delete ws.state.pendingSync;
   const remote = new Map(r.listing.files.map((f) => [f.path, f.sha256]));
   for (const f of put) ws.state.files[f.path] = { local: f.sha256, remote: remote.get(f.path) ?? f.sha256 };
   for (const rel of del) delete ws.state.files[rel];
@@ -295,6 +338,8 @@ export async function pull(ws: Workspace, api: FileApi, opts: { knownRevision?: 
   if (!full && opts.knownRevision && opts.knownRevision === ws.state.revision) return out;
   const listing = await api.list(ws.state.projectId, opts.signal);
   if (!full && listing.revision === ws.state.revision) return out;
+  // Validate every prospective target before any partial pull or deletion.
+  for (const rel of new Set([...Object.keys(ws.state.files), ...ws.state.conflicts, ...listing.files.map((f) => f.path)])) await pathInside(ws.root, rel);
 
   const backupRel = `${WORKSPACE_DIR}/backup/${backupName(ws.state.revision)}`;
   const backup = async (rel: string, data: Buffer) => {
@@ -308,7 +353,7 @@ export async function pull(ws: Workspace, api: FileApi, opts: { knownRevision?: 
     if (!safeRel(f.path)) continue;
     onServer.add(f.path);
     const rec = ws.state.files[f.path];
-    const abs = ws.abs(f.path);
+    const abs = await pathInside(ws.root, f.path);
     const cur = await readIfFile(abs);
     const curSha = cur ? sha256(cur) : null;
     if (curSha === f.sha256) {
@@ -321,7 +366,9 @@ export async function pull(ws: Workspace, api: FileApi, opts: { knownRevision?: 
       throw new RefusalError(refusal("download_corrupt", `${f.path} arrived from HeyPCB with different bytes than HeyPCB listed.`, "Call the tool again; nothing here was overwritten.", { retryable: true }));
     }
     // Changed here since the last sync (a save in KiCad while the call ran, or before it): never overwrite.
-    const editedHere = cur !== null && (!rec || curSha !== rec.local);
+    const current = await readIfFile(await pathInside(ws.root, f.path));
+    const currentSha = current ? sha256(current) : null;
+    const editedHere = currentSha !== curSha || (current !== null && (!rec || currentSha !== rec.local));
     if (editedHere && !opts.takeHeypcb) {
       await writeInside(ws.root, f.path + NEW_SUFFIX, data);
       ws.state.files[f.path] = { local: rec?.local ?? "", remote: f.sha256 };
@@ -329,7 +376,14 @@ export async function pull(ws: Workspace, api: FileApi, opts: { knownRevision?: 
       out.conflicts.push(f.path);
       continue;
     }
-    if (cur) await backup(f.path, cur);
+    if (current) await backup(f.path, current);
+    const afterBackup = await readIfFile(await pathInside(ws.root, f.path));
+    if ((afterBackup ? sha256(afterBackup) : null) !== currentSha) {
+      await writeInside(ws.root, f.path + NEW_SUFFIX, data);
+      ws.state.files[f.path] = { local: rec?.local ?? "", remote: f.sha256 };
+      conflicts.add(f.path); out.conflicts.push(f.path);
+      continue;
+    }
     await writeInside(ws.root, f.path, data);
     if (await openInKicad(abs)) out.openInKicad.push(f.path);
     ws.state.files[f.path] = { local: f.sha256, remote: f.sha256 };
@@ -341,18 +395,18 @@ export async function pull(ws: Workspace, api: FileApi, opts: { knownRevision?: 
     if (onServer.has(rel)) continue;
     const rec = ws.state.files[rel];
     delete ws.state.files[rel];
-    const cur = await readIfFile(ws.abs(rel));
+    const cur = await readIfFile(await pathInside(ws.root, rel));
     if (!cur) continue;
     if (sha256(cur) !== rec.local && !opts.takeHeypcb) {
       out.kept.push(rel); // HeyPCB removed a file that changed here: the file stays, and the next push sends it again
       continue;
     }
     await backup(rel, cur);
-    await fsp.rm(ws.abs(rel), { force: true });
+    await fsp.rm(await pathInside(ws.root, rel), { force: true });
     out.deleted.push(rel);
   }
 
-  if (opts.takeHeypcb) for (const rel of ws.state.conflicts) await fsp.rm(ws.abs(rel) + NEW_SUFFIX, { force: true });
+  if (opts.takeHeypcb) for (const rel of ws.state.conflicts) await fsp.rm(await pathInside(ws.root, rel + NEW_SUFFIX), { force: true });
   ws.state.conflicts = [...conflicts].sort();
   ws.state.revision = listing.revision;
   await ws.save();
@@ -361,7 +415,7 @@ export async function pull(ws: Workspace, api: FileApi, opts: { knownRevision?: 
 
 /** Drop the `.heypcb-new` copies and send the files here over HeyPCB's (keep_local). */
 export async function keepLocal(ws: Workspace, api: FileApi, signal?: AbortSignal): Promise<PushResult> {
-  for (const rel of ws.state.conflicts) await fsp.rm(ws.abs(rel) + NEW_SUFFIX, { force: true });
+  for (const rel of ws.state.conflicts) await fsp.rm(await pathInside(ws.root, rel + NEW_SUFFIX), { force: true });
   // A conflicted file's `local` hash is stale on purpose: forget it so the file goes up.
   for (const rel of ws.state.conflicts) if (ws.state.files[rel]) ws.state.files[rel].local = "";
   ws.state.conflicts = [];
@@ -372,10 +426,10 @@ export async function keepLocal(ws: Workspace, api: FileApi, signal?: AbortSigna
 export type Backup = { revision: string; path: string; files: number; savedAt: string };
 
 export async function listBackups(ws: Workspace): Promise<Backup[]> {
-  const dir = path.join(ws.dir, "backup");
+  const dir = await pathInside(ws.root, `${WORKSPACE_DIR}/backup`);
   const out: Backup[] = [];
   for (const name of await fsp.readdir(dir).catch(() => [] as string[])) {
-    const p = path.join(dir, name);
+    const p = await pathInside(ws.root, `${WORKSPACE_DIR}/backup/${name}`);
     const st = await fsp.stat(p).catch(() => null);
     if (!st?.isDirectory()) continue;
     out.push({ revision: name, path: p, files: (await filesUnder(p)).length, savedAt: st.mtime.toISOString() });
@@ -400,7 +454,7 @@ async function filesUnder(dir: string, prefix = ""): Promise<string[]> {
  */
 export async function restore(ws: Workspace, revision: string): Promise<{ restored: string[]; savedCurrentAs: string | null }> {
   const name = backupName(revision);
-  const src = path.join(ws.dir, "backup", name);
+  const src = await pathInside(ws.root, `${WORKSPACE_DIR}/backup/${name}`);
   const files = (await filesUnder(src)).filter(safeRel);
   if (!files.length) {
     const have = (await listBackups(ws)).map((b) => b.revision);
@@ -409,12 +463,12 @@ export async function restore(ws: Workspace, revision: string): Promise<{ restor
   const stamp = `before-restore-${new Date().toISOString().replace(/[:.]/g, "-")}`;
   let saved = false;
   for (const rel of files) {
-    const cur = await readIfFile(ws.abs(rel));
+    const cur = await readIfFile(await pathInside(ws.root, rel));
     if (cur) {
       await writeInside(ws.root, `${WORKSPACE_DIR}/backup/${stamp}/${rel}`, cur);
       saved = true;
     }
-    await writeInside(ws.root, rel, await fsp.readFile(path.join(src, ...rel.split("/"))));
+    await writeInside(ws.root, rel, await fsp.readFile(await pathInside(ws.root, `${WORKSPACE_DIR}/backup/${name}/${rel}`)));
   }
   return { restored: files, savedCurrentAs: saved ? stamp : null };
 }
@@ -450,7 +504,7 @@ export class Workspaces {
     if (known) return known;
     const root = (await this.index())[this.key(id)];
     if (typeof root !== "string") return null;
-    const ws = await Workspace.load(root).catch(() => null);
+    const ws = await Workspace.load(root);
     if (!ws || ws.state.projectId !== id || ws.state.apiBase !== this.apiBase) return null;
     this.open.set(id, ws);
     return ws;

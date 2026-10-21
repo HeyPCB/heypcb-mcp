@@ -1,21 +1,9 @@
 /**
- * The client side of per-call billing. HeyPCB prices and charges each call;
- * this only keeps the person running the agent in control of the total:
- *
- * - a cap for this server process, `--max-spend <amount>` on the command
- *   line that starts it (in the units HeyPCB bills in). Once the session has
- *   spent it, a call is refused here, before it is sent — except the tools
- *   HeyPCB never charges for (FREE_TOOLS), which still go, with maxCost 0;
- * - a per-call cap, `_meta.heypcb.maxCost` on a tools/call. The smaller of
- *   it and what is left of the session cap goes to HeyPCB as
- *   `_meta.heypcb.maxCost`, and HeyPCB refuses a call that would cost more
- *   (it alone knows the price: no extra estimate round trip here);
- * - one idempotency key per logical call (`_meta.heypcb.idempotencyKey`,
- *   kept when the agent sends its own), the same on every retry, so a retry
- *   is never charged twice;
- * - the running total, from `_meta.heypcb.billing = { charged, balance, unit }`
- *   on each result, shown by whoami, and one JSON line per paid call in a
- *   bound workspace's `.heypcb/usage.log`.
+ * Optional server-reported charges and caller spending constraints.
+ * Current MCP billing metadata has no advertised enforcement contract, so
+ * any supplied cap blocks potentially charged calls before dispatch.
+ * Missing charge metadata remains unmeasured. Forwarded logical keys are
+ * not evidence of server billing idempotency; lost writes require readback.
  */
 import { randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
@@ -49,6 +37,7 @@ function round(n: number): number {
 export class Spend {
   total = 0;
   paidCalls = 0;
+  measuredCalls = 0;
   unit: string | null = null;
   balance: number | null = null;
 
@@ -60,7 +49,15 @@ export class Spend {
    */
   prepare(tool: string, meta: Record<string, unknown> | undefined): { meta: Record<string, unknown> } | { refusal: Refusal } {
     const h = { ...heypcbMeta(meta) };
+    if (h.maxCost !== undefined && (typeof h.maxCost !== "number" || !Number.isFinite(h.maxCost) || h.maxCost < 0)) {
+      return { refusal: refusal("bad_spend_cap", "The call's spending limit is not a nonnegative finite amount.", "Supply a valid limit; nothing was sent.") };
+    }
     const perCall = typeof h.maxCost === "number" && Number.isFinite(h.maxCost) && h.maxCost >= 0 ? h.maxCost : null;
+    // The current server does not consume these billing metadata caps.
+    // A local counter cannot protect a balance when charges are unreported.
+    if ((this.cap !== null || perCall !== null) && !FREE_TOOLS.has(tool)) {
+      return { refusal: refusal("spend_cap_unsupported", "HeyPCB cannot enforce this call's spending limit through the current MCP server, so the call was not sent.", "Keep the limit in place and use verified free reads or local checks. Run priced work only through a surface that can enforce the budget.", { written: false, retryable: false }) };
+    }
     let maxCost = perCall;
     if (this.cap !== null) {
       const left = round(this.cap - this.total);
@@ -86,6 +83,7 @@ export class Spend {
   async record(result: CallToolResult, tool: string, sent: Record<string, unknown>, usageLog?: string): Promise<Billing | null> {
     const b = billingOf(result);
     if (!b) return null;
+    this.measuredCalls++;
     if (b.unit) this.unit = b.unit;
     if (b.balance !== null) this.balance = b.balance;
     if (b.charged <= 0) return b;
@@ -99,14 +97,15 @@ export class Spend {
     return b;
   }
 
-  summary(): { charged: number; paidCalls: number; unit: string | null; cap: number | null; left: number | null } {
-    return { charged: this.total, paidCalls: this.paidCalls, unit: this.unit, cap: this.cap, left: this.cap === null ? null : Math.max(0, round(this.cap - this.total)) };
+  summary(): { charged: number | null; paidCalls: number | null; unit: string | null; cap: number | null; left: number | null; capEnforced: false } {
+    return { capEnforced: false, charged: this.measuredCalls ? this.total : null, paidCalls: this.measuredCalls ? this.paidCalls : null, unit: this.unit, cap: this.cap, left: this.cap === null || !this.measuredCalls ? null : Math.max(0, round(this.cap - this.total)) };
   }
 
   line(): string {
     const s = this.summary();
+    if (!this.measuredCalls) return `This session's charges are unmeasured: the server has supplied no billing metadata.${s.cap !== null ? ` Configured cap ${s.cap}; potentially charged calls are blocked because server-side caps are unsupported.` : ""}`;
     const u = s.unit ? ` ${s.unit}` : "";
-    return `This session (this MCP server process): ${s.charged}${u} charged over ${s.paidCalls} paid call${s.paidCalls === 1 ? "" : "s"}${s.cap !== null ? `; cap ${s.cap}${u}, ${s.left}${u} left` : "; no spend cap (start the server with --max-spend <amount> to set one)"}.`;
+    return `This session (this MCP server process): ${s.charged}${u} charged over ${s.paidCalls} paid call${s.paidCalls === 1 ? "" : "s"}${s.cap !== null ? `; requested cap ${s.cap}${u}, potentially charged calls blocked until server enforcement is available` : "; no spend cap"}.`;
   }
 }
 

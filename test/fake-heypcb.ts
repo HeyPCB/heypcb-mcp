@@ -77,7 +77,7 @@ export const FAKE_TOOLS: Tool[] = [...REMOTE_TOOLS, ...DESIGN_TOOLS];
 
 export const REFUSAL = { ok: false, code: "wallet_empty", error: "Your HeyPCB balance is used up.", fix: "Add credit in Settings → Plan & billing, then call build_board again.", retryable: false };
 
-export type Recorded = { method: string; path: string; headers: http.IncomingHttpHeaders; body: Buffer };
+export type Recorded = { method: string; path: string; headers: http.IncomingHttpHeaders; body: Buffer; sync?: { baseRevision: string; files: Array<{ path: string }>; delete: string[] } };
 
 export type FakeOptions = {
   /** Bearers /mcp and /v1 accept. Anything else is 401 token_expired. */
@@ -90,8 +90,14 @@ export type FakeOptions = {
   exportAnswer?: { status: number; headers: Record<string, string>; body: Buffer | string };
   /** /mcp answers this status to everything (to test transport failures). */
   mcpStatus?: number;
+  /** Lose one tool's reply after dispatch, without breaking discovery. */
+  mcpCallFault?: { name: string; status?: number };
   /** Offer the project file API (default true). */
   filesApi?: boolean;
+  dropPutReply?: boolean;
+  manifestAfterPutFault?: boolean;
+  duringDownload?: (rel: string) => Promise<void> | void;
+  omitBilling?: boolean;
   /** Price per tool call (the ledger charges once per idempotency key). */
   prices?: Record<string, number>;
   /** Leave `_meta.heypcb.revision` out of results (the client then asks the file list). */
@@ -144,6 +150,7 @@ export async function startFakeHeypcb(opts: FakeOptions = {}): Promise<Fake> {
   let importIdx = 0;
   const projects = new Map<string, FakeProject>();
   const ledger = new Map<string, number>();
+  const syncReplies = new Map<string, { signature: string; answer: Record<string, unknown> }>();
   let balance = 100;
   const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
   const rev = (p: FakeProject) => `r${p.revision}`;
@@ -217,7 +224,7 @@ export async function startFakeHeypcb(opts: FakeOptions = {}): Promise<Fake> {
       }
       return { charged, balance, unit: "USD" };
     };
-    if (name === "whoami") return { content: [{ type: "text", text: JSON.stringify({ ok: true, balance }) }], structuredContent: { ok: true, balance }, _meta: { heypcb: { billing: billing() } } };
+    if (name === "whoami") return { content: [{ type: "text", text: JSON.stringify({ ok: true, balance }) }], structuredContent: { ok: true, balance }, ...(opts.omitBilling ? {} : { _meta: { heypcb: { billing: billing() } } }) };
     const p = projects.get(String(args.project ?? ""));
     if (!p) {
       const r = { ok: false, code: "not_found", error: "no such project", fix: "", retryable: false };
@@ -232,7 +239,7 @@ export async function startFakeHeypcb(opts: FakeOptions = {}): Promise<Fake> {
         editFile(String(args.project), board, cur.replace(/\)\s*$/, `  ${text}\n)\n`));
       }
     }
-    const heypcb: Record<string, unknown> = { billing: billing() };
+    const heypcb: Record<string, unknown> = opts.omitBilling ? {} : { billing: billing() };
     if (!opts.omitRevision) heypcb.revision = rev(p);
     if (name === "add_parts") heypcb.parts = args.parts ?? [];
     const out = { ok: true, board: p.files.get(board)?.toString("utf8") ?? null };
@@ -242,7 +249,8 @@ export async function startFakeHeypcb(opts: FakeOptions = {}): Promise<Fake> {
   const server = http.createServer(async (req, res) => {
     const body = await readBody(req);
     const url = new URL(req.url ?? "/", "http://x");
-    requests.push({ method: req.method ?? "", path: url.pathname, headers: req.headers, body });
+    const recorded: Recorded = { method: req.method ?? "", path: url.pathname, headers: req.headers, body };
+    requests.push(recorded);
     try {
       if (url.pathname === "/mcp") {
         if (opts.mcpStatus) return json(res, opts.mcpStatus, { ok: false, code: "not_found", error: "There's nothing at this address.", fix: "HeyPCB is at https://heypcb.ai.", retryable: false });
@@ -258,6 +266,14 @@ export async function startFakeHeypcb(opts: FakeOptions = {}): Promise<Fake> {
             cancelled.push(m.params?.requestId);
             inflight.get(String(m.params?.requestId))?.abort();
           }
+        }
+        const fault = opts.mcpCallFault;
+        if (fault && parsed.method === "tools/call" && parsed.params?.name === fault.name) {
+          if (fault.status) {
+            res.writeHead(fault.status, { "content-type": "text/plain" });
+            return res.end("upstream reply lost");
+          }
+          return res.destroy();
         }
         const s = mcpServer();
         const t = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -308,29 +324,48 @@ export async function startFakeHeypcb(opts: FakeOptions = {}): Promise<Fake> {
         res.writeHead(a.status, a.headers);
         return res.end(a.body);
       }
-      const fm = /^\/v1\/projects\/([^/]+)\/files(\/content)?$/.exec(url.pathname);
+      const fm = /^\/v1\/projects\/([^/]+)\/files(?:\/(.+))?$/.exec(url.pathname);
       if (fm && opts.filesApi !== false) {
         if (!bearerOk(req)) return unauthorized(res);
         const p = projects.get(decodeURIComponent(fm[1]));
         if (!p) return json(res, 404, { ok: false, code: "not_found", error: "no such project", fix: "", retryable: false });
+        if (req.method === "GET" && fm[2] === "manifest") {
+          if (opts.manifestAfterPutFault && p.revision > 1) return json(res, 503, { ok: false, code: "runner_unavailable", error: "manifest unavailable", fix: "", retryable: true });
+          return json(res, 200, listing(p));
+        }
         if (fm[2] && req.method === "GET") {
-          const data = p.files.get(url.searchParams.get("path") ?? "");
+          const rel = fm[2].split("/").map(decodeURIComponent).join("/");
+          const data = p.files.get(rel);
           if (!data) return json(res, 404, { ok: false, code: "not_found", error: "no such file", fix: "", retryable: false });
+          await opts.duringDownload?.(rel);
           res.writeHead(200, { "content-type": "application/octet-stream" });
           return res.end(data);
         }
-        if (!fm[2] && req.method === "GET") return json(res, 200, listing(p));
+        if (!fm[2] && req.method === "GET") return json(res, 400, { ok:false, code:"format_unsupported", error:"files is a zip route", fix:"use manifest", written:false });
         if (!fm[2] && req.method === "PUT") {
-          const b = JSON.parse(body.toString("utf8")) as { baseRevision: string | null; files: Array<{ path: string; sha256: string; contentBase64: string }>; delete: string[] };
-          if (b.baseRevision !== rev(p)) return json(res, 409, { ok: false, code: "revision_conflict", error: "HeyPCB's copy changed.", fix: "", retryable: false, revision: rev(p) });
-          for (const f of b.files) {
-            const data = Buffer.from(f.contentBase64, "base64");
-            if (sha(data) !== f.sha256) return json(res, 400, { ok: false, code: "bad_sha", error: f.path, fix: "", retryable: false });
-            p.files.set(f.path, data);
+          if (!String(req.headers["content-type"]).startsWith("multipart/form-data")) return json(res, 400, { ok:false, code:"sync_body_unreadable", error:"sync is multipart", fix:"send zip and manifest", written:false });
+          const form = await new Response(new Uint8Array(body), { headers: { "content-type": String(req.headers["content-type"]) } }).formData();
+          const raw = form.get("manifest"); const upload = form.get("file");
+          if (typeof raw !== "string" || !upload || typeof upload === "string" || form.get("mode") !== "replace") return json(res,422,{ok:false,code:"bad_upload",error:"missing zip/manifest/mode",fix:"",written:false});
+          const b = JSON.parse(raw) as { baseRevision:string; board:{path:string;sha256:string;source:string}; files:Array<{path:string;sha256:string}> };
+          recorded.sync = { baseRevision:b.baseRevision, files:b.files, delete:[] };
+          const syncKey = String(req.headers["idempotency-key"] ?? "");
+          const signature = JSON.stringify(b);
+          const prior = syncReplies.get(syncKey);
+          if (syncKey && prior) {
+            if (prior.signature !== signature) return json(res,409,{ok:false,code:"idempotency_key_reused",error:"changed body",fix:"",written:false});
+            if (opts.dropPutReply) { res.socket?.destroy(); return; }
+            return json(res,200,prior.answer);
           }
-          for (const d of b.delete) p.files.delete(d);
-          p.revision++;
-          return json(res, 200, listing(p));
+          if (b.baseRevision !== rev(p)) return json(res,409,{ok:false,code:"sync_conflict",error:"HeyPCB changed",fix:"",written:false,serverRevision:rev(p)});
+          const incoming = readZip(Buffer.from(await upload.arrayBuffer()));
+          if (b.board.source !== "disk" || b.files.length !== incoming.size || b.files.some((f) => !incoming.has(f.path) || sha(incoming.get(f.path)!) !== f.sha256) || b.board.sha256 !== sha(incoming.get(b.board.path)!)) return json(res,422,{ok:false,code:"bad_manifest",error:"manifest differs from zip",fix:"",written:false});
+          recorded.sync.delete = [...p.files.keys()].filter((f) => !incoming.has(f));
+          p.files = incoming; p.revision++;
+          const answer = {ok:true,revision:rev(p),unchanged:false,changed:b.files.map((f) => f.path),removed:recorded.sync.delete};
+          if (syncKey) syncReplies.set(syncKey,{signature,answer});
+          if (opts.dropPutReply) { res.socket?.destroy(); return; }
+          return json(res,200,answer);
         }
       }
       const pa = /^\/v1\/parts\/([^/]+)\/assets$/.exec(url.pathname);

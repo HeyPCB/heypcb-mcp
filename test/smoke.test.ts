@@ -30,14 +30,29 @@ async function run(env: Record<string, string>, args: string[] = []) {
 test("dist/cli.js serves the remote tools and the local ones over stdio", { skip: !existsSync(cli) && "dist/cli.js is not built" }, async () => {
   const fake = await startFakeHeypcb({ acceptTokens: new Set([TEST_KEY]) });
   closers.push(fake.close);
-  const client = await run({ HEYPCB_MCP_URL: fake.mcpUrl, HEYPCB_API_KEY: TEST_KEY }, ["--max-spend", "5"]);
+  const client = await run({ HEYPCB_MCP_URL: fake.mcpUrl, HEYPCB_API_KEY: TEST_KEY });
   assert.equal(client.getServerVersion()?.name, "heypcb");
   const names = (await client.listTools()).tools.map((t) => t.name);
   assert.deepEqual(names, [...FAKE_TOOLS, ...LOCAL_TOOLS].map((t) => t.name));
   const who = await client.callTool({ name: "whoami", arguments: {} });
-  assert.match((who.content as Array<{ text: string }>).at(-1)!.text, /cap 5/, "--max-spend reached the server");
+  assert.equal(who.isError, undefined);
   const res = await client.callTool({ name: "echo", arguments: { text: "from the bundle" } });
   assert.deepEqual((res.structuredContent as { echoed: unknown }).echoed, { text: "from the bundle" });
+});
+
+test("dist/cli.js keeps a requested cap and refuses unknown charges before remote dispatch", { skip: !existsSync(cli) && "dist/cli.js is not built" }, async () => {
+  const fake = await startFakeHeypcb({ acceptTokens: new Set([TEST_KEY]) });
+  closers.push(fake.close);
+  const client = await run({ HEYPCB_MCP_URL: fake.mcpUrl, HEYPCB_API_KEY: TEST_KEY }, ["--max-spend", "5"]);
+  const who = await client.callTool({ name: "whoami", arguments: {} });
+  assert.equal(who.isError, undefined, "verified free reads remain available");
+  const session = (who._meta as { heypcb: { session: { cap: number; capEnforced: boolean } } }).heypcb.session;
+  assert.equal(session.cap, 5);
+  assert.equal(session.capEnforced, false, "the server does not enforce the configured metadata cap");
+  const res = await client.callTool({ name: "echo", arguments: { text: "not dispatched" } });
+  assert.equal(res.isError, true);
+  assert.equal((res.structuredContent as { code: string }).code, "spend_cap_unsupported");
+  assert.equal(fake.rpc.filter((r) => r.method === "tools/call" && r.params?.name === "echo").length, 0);
 });
 
 test("dist/cli.js run by hand with nothing on stdin says what it is, and exits 0", { skip: !existsSync(cli) && "dist/cli.js is not built" }, async () => {

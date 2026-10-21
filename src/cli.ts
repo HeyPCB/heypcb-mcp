@@ -1,6 +1,6 @@
 /**
  * `npx -y @heypcb/mcp`            the MCP server, on stdio (what an agent runs);
- *                                  `--max-spend <amount>` caps what it may spend
+ *                                  `--max-spend <amount>` requires an enforced budget
  * `npx @heypcb/mcp login`         sign in with a code you approve at heypcb.ai/connect
  * `npx @heypcb/mcp logout`        sign out here and end that sign-in on HeyPCB
  * `npx @heypcb/mcp status`        who this computer is signed in as
@@ -22,7 +22,7 @@ const HELP = `HeyPCB MCP server ${VERSION}
 
 Usage:
   npx -y @heypcb/mcp            Run the MCP server on stdio (add this to your agent).
-        --max-spend <amount>    Refuse paid calls once this server process has spent
+        --max-spend <amount>    Require an enforceable cap; potentially charged calls stay blocked until supported.
                                 <amount> (in the units HeyPCB bills in).
   npx @heypcb/mcp login         Sign in: approve a code at heypcb.ai/connect.
         --no-browser            Print the link instead of opening it.

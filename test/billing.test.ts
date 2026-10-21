@@ -1,9 +1,5 @@
-/**
- * The client side of per-call billing, through the local server against the
- * fake host's ledger: the spend cap refuses before anything is sent, the
- * cap and a per-call cap go out as maxCost, a retry with the same
- * idempotency key is charged once, paid calls in a bound folder are logged,
- * and whoami shows the session total.
+/** Caller caps fail closed against the current unsupported metadata
+ * contract; optional reported charges are recorded, absent data is unknown.
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -50,37 +46,38 @@ test("--max-spend parses as a number, anywhere in the arguments", () => {
   assert.ok("error" in parseMaxSpend(["--max-spend", "lots"]));
 });
 
-test("an agent's own idempotency key and other _meta are kept; a per-call cap goes out as maxCost", () => {
+test("an agent's own key and trace are kept without claiming server-side cap support", () => {
   const s = new Spend(null);
-  const r = s.prepare("edit_board", { trace: "t", heypcb: { idempotencyKey: "k1", maxCost: 2 } });
+  const r = s.prepare("edit_board", { trace: "t", heypcb: { idempotencyKey: "k1" } });
   assert.ok("meta" in r);
-  assert.deepEqual(r.meta, { trace: "t", heypcb: { idempotencyKey: "k1", maxCost: 2 } });
-  const fresh = s.prepare("edit_board", undefined);
-  assert.ok("meta" in fresh && typeof (fresh.meta.heypcb as { idempotencyKey: string }).idempotencyKey === "string");
-  assert.equal((fresh as { meta: { heypcb: { maxCost?: number } } }).meta.heypcb.maxCost, undefined, "no cap, no maxCost");
+  assert.deepEqual(r.meta, { trace: "t", heypcb: { idempotencyKey: "k1" } });
+  for (const cap of [0, 2]) {
+    const capped = s.prepare("edit_board", {heypcb:{maxCost:cap}});
+    assert.ok("refusal" in capped && capped.refusal.code === "spend_cap_unsupported");
+  }
+  for (const cap of [-1, Infinity, NaN, "2"]) {
+    const invalid = s.prepare("edit_board", {heypcb:{maxCost:cap}});
+    assert.ok("refusal" in invalid && invalid.refusal.code === "bad_spend_cap");
+  }
 });
 
-test("the cap goes out as maxCost, shrinking as it is spent; once spent, calls are refused before they are sent", async () => {
-  const { call, sentMeta, fake } = await setup({ prices: { whoami: 0, edit_board: 1 } }, 2.5);
-  const s = setupProject(fake);
-  assert.equal((await call("edit_board", { project: s })).isError, undefined);
-  assert.equal(sentMeta().at(-1)!.maxCost, 2.5);
-  assert.equal((await call("edit_board", { project: s })).isError, undefined);
-  assert.equal(sentMeta().at(-1)!.maxCost, 1.5);
-  const third = await call("edit_board", { project: s });
-  assert.equal((third.structuredContent as { code: string }).code, "over_max_cost", "HeyPCB refuses a call that would cross what is left");
-  // Spend exactly to the cap, then the next call never leaves this computer.
-  const capped = await setup({ prices: { edit_board: 1 } }, 1);
-  const p2 = setupProject(capped.fake);
-  await capped.call("edit_board", { project: p2 });
-  const sent = capped.fake.rpc.filter((m) => m.method === "tools/call").length;
-  const refused = await capped.call("edit_board", { project: p2 });
-  assert.equal((refused.structuredContent as { code: string }).code, "spend_cap_reached");
-  assert.equal(capped.fake.rpc.filter((m) => m.method === "tools/call").length, sent, "nothing was sent");
-  assert.equal(capped.fake.ledger.size, 1);
-  const who = await capped.call("whoami");
-  assert.equal(who.isError, undefined, "a free tool still works once the cap is spent");
-  assert.equal(capped.sentMeta().at(-1)!.maxCost, 0);
+test("session and per-call limits fail closed before charged dispatch, including a zero limit", async () => {
+  for (const cap of [0, 2.5]) {
+    const s = await setup({prices:{edit_board:1}},cap);
+    const id = setupProject(s.fake);
+    const refused = await s.call("edit_board",{project:id});
+    assert.equal((refused.structuredContent as {code:string}).code,"spend_cap_unsupported");
+    assert.equal(s.fake.rpc.filter((r) => r.method === "tools/call").length,0);
+    assert.equal(s.fake.ledger.size,0);
+    assert.equal((await s.call("whoami")).isError,undefined,"verified free reads remain available");
+  }
+  const s = await setup({prices:{edit_board:1}}); const id = setupProject(s.fake);
+  for (const maxCost of [0,2]) {
+    const refused = await s.call("edit_board",{project:id},{heypcb:{maxCost}});
+    assert.equal((refused.structuredContent as {code:string}).code,"spend_cap_unsupported");
+  }
+  assert.equal(s.fake.rpc.filter((r) => r.method === "tools/call").length,0);
+  assert.equal(s.fake.ledger.size,0);
 });
 
 /** A HeyPCB project (not bound to a folder) the fake's design tools can work on. */
@@ -90,21 +87,16 @@ function setupProject(fake: Fake): string {
   return id;
 }
 
-test("a retry with the same idempotency key is charged once — 100 logical calls, each sent twice, make 100 charges", async () => {
-  const { call, fake, running } = await setup({ prices: { edit_board: 0.01 } });
-  const id = setupProject(fake);
-  for (let i = 0; i < 100; i++) {
-    const key = `logical-${i}`;
-    await call("edit_board", { project: id }, { heypcb: { idempotencyKey: key } });
-    await call("edit_board", { project: id }, { heypcb: { idempotencyKey: key } }); // the agent's retry after a timeout
-  }
-  assert.equal(fake.ledger.size, 100);
-  assert.equal(running.spend.summary().paidCalls, 100);
-  assert.equal(running.spend.summary().charged, 1);
+test("missing server billing metadata is unmeasured, not a measured zero", async () => {
+  const { call, running } = await setup({omitBilling:true});
+  const result = await call("whoami");
+  assert.equal(running.spend.summary().charged,null);
+  assert.equal(running.spend.summary().paidCalls,null);
+  assert.match((result.content as Array<{text:string}>).at(-1)!.text,/unmeasured/);
 });
 
 test("paid calls in a bound folder go to .heypcb/usage.log, and whoami shows the session total", async () => {
-  const { call, home } = await setup({ prices: { edit_board: 0.25 } }, 10);
+  const { call, home } = await setup({ prices: { edit_board: 0.25 } });
   const root = await copyFixture("blinky2", home);
   const id = ((await call("open_kicad_project", { path: root })).structuredContent as { project: { id: string } }).project.id;
   await call("edit_board", { project: id });
@@ -121,6 +113,6 @@ test("paid calls in a bound folder go to .heypcb/usage.log, and whoami shows the
   assert.ok(lines.every((l) => typeof l.idempotencyKey === "string" && l.revision));
   const who = await call("whoami");
   const text = (who.content as Array<{ text: string }>).map((c) => c.text).join("\n");
-  assert.match(text, /0\.5 USD charged over 2 paid calls; cap 10 USD, 9\.5 USD left/);
-  assert.deepEqual((who._meta as { heypcb: { session: unknown } }).heypcb.session, { charged: 0.5, paidCalls: 2, unit: "USD", cap: 10, left: 9.5 });
+  assert.match(text, /0\.5 USD charged over 2 paid calls; no spend cap/);
+  assert.deepEqual((who._meta as { heypcb: { session: unknown } }).heypcb.session, { charged: 0.5, paidCalls: 2, unit: "USD", cap: null, left: null, capEnforced: false });
 });

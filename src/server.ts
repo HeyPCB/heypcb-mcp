@@ -9,8 +9,8 @@
  * - when the call's `project` is bound to a folder here (open_kicad_project),
  *   the folder is synced around it (workspace.ts): changes here pushed
  *   before; after a call the server marks as changing the design
- *   (`readOnlyHint: false`), HeyPCB's changes pulled back, and the parts an
- *   add_parts / add_block placed installed into the project's libraries.
+ *   (`readOnlyHint: false`), HeyPCB's changes pulled back. Part installation remains unavailable
+ *   until the server provides a supported assets API.
  *   What changed here is added as `_meta.heypcb.local` and one text line.
  */
 import path from "node:path";
@@ -22,7 +22,7 @@ import { heypcbMeta, Spend } from "./billing.ts";
 import { OFFLINE_CATALOG } from "./catalog.ts";
 import type { Config } from "./config.ts";
 import { CredentialStore } from "./credentials.ts";
-import { installParts, type InstallResult } from "./library.ts";
+import type { InstallResult } from "./library.ts";
 import { callLocalTool, LOCAL_TOOL_NAMES, LOCAL_TOOLS, projectId } from "./local-tools.ts";
 import { RefusalError, refusalResult, type Refusal } from "./refusal.ts";
 import { Remote, type Progress } from "./remote.ts";
@@ -32,7 +32,7 @@ import { FileApi, NEW_SUFFIX, pull, push, Workspace, WORKSPACE_DIR, Workspaces, 
 const LOCAL_NOTE =
   "This is HeyPCB's local MCP server (@heypcb/mcp). To work on a KiCad project on this computer, call open_kicad_project with its folder first and use the `project` id it returns: " +
   "every HeyPCB tool then keeps that folder in sync (your edits go up before a call, HeyPCB's come back after it, with backups). " +
-  "It also adds upload_kicad_project (a one-off copy on HeyPCB), save_export (HeyPCB's files to a folder here), install_parts (parts into the project's own libraries), " +
+  "It also adds upload_kicad_project (a one-off copy on HeyPCB), save_export (HeyPCB's files to a folder here), " +
   "check_local / export_local (KiCad's own DRC, ERC and exports via kicad-cli, free) and restore_local. " +
   "A tool that answers ok:false explains itself in `error` and says what to do in `fix`.";
 
@@ -94,7 +94,7 @@ function localLine(r: LocalReport): string | null {
     parts.push(r.open_in_kicad?.length ? `${r.open_in_kicad.join(", ")} ${r.open_in_kicad.length === 1 ? "is" : "are"} open in KiCad: tell the user to reload (File → Revert) before editing, or a save there will overwrite these changes.` : "Tell the user to reload them in KiCad if they are open.");
   }
   if (r.installed?.length) parts.push(`Installed ${r.installed.length} part${r.installed.length === 1 ? "" : "s"} into the project's heypcb libraries.`);
-  if (r.install_failed?.length) parts.push(`Could not install ${r.install_failed.map((f) => f.part).join(", ")} locally (call install_parts to retry).`);
+  if (r.install_failed?.length) parts.push(`Part assets are unavailable for ${r.install_failed.map((f) => f.part).join(", ")}; existing local libraries were kept.`);
   if (r.sync_error) parts.push(`The folder was not synced after the call: ${r.sync_error.error} ${r.sync_error.fix}`);
   return parts.length ? parts.join(" ") : null;
 }
@@ -163,7 +163,7 @@ export async function startServer(transport: Transport, opts: ServeOptions): Pro
     const { name } = req.params;
     const args = req.params.arguments as Record<string, unknown> | undefined;
     if (!config || !auth || !remote || !workspaces || !api) return refusalResult(opts.configRefusal!);
-    if (LOCAL_TOOL_NAMES.has(name)) return callLocalTool({ config, auth, workspaces, home: opts.home, cwd: opts.cwd }, name, args, extra.signal);
+    if (LOCAL_TOOL_NAMES.has(name) || name === "install_parts") return callLocalTool({ config, auth, workspaces, home: opts.home, cwd: opts.cwd }, name, args, extra.signal);
     const token = req.params._meta?.progressToken;
     const relay = (p: Progress) => {
       if (token === undefined) return;
@@ -177,7 +177,12 @@ export async function startServer(transport: Transport, opts: ServeOptions): Pro
     const forward = () => remote.callTool(name, args, { signal: extra.signal, onProgress: relay, meta });
 
     const id = projectId(args?.project);
-    const ws = id ? await workspaces.forProject(id) : null;
+    let ws: Workspace | null;
+    try { ws = id ? await workspaces.forProject(id) : null; }
+    catch (err) {
+      if (err instanceof RefusalError) return refusalResult(err.refusal);
+      throw err;
+    }
     let result: CallToolResult;
     if (!ws) {
       result = await forward();
@@ -185,7 +190,7 @@ export async function startServer(transport: Transport, opts: ServeOptions): Pro
     } else {
       // The server's own word on whether this tool changes the design; unknown (offline catalog) counts as changing.
       const tool = remote.tools?.find((t) => t.name === name);
-      const mutating = tool ? tool.annotations?.readOnlyHint === false : true;
+      const mutating = tool?.annotations?.readOnlyHint !== true;
       const usageLog = path.join(ws.dir, "usage.log");
       const run = async (): Promise<CallToolResult> => {
         let pushed: PushResult;
@@ -206,9 +211,7 @@ export async function startServer(transport: Transport, opts: ServeOptions): Pro
           Object.assign(local, report(ws, pushed, pulled));
           const parts = PLACES_PARTS.has(name) ? partsOf(res) : [];
           if (parts.length) {
-            const inst = await installParts({ config, auth }, ws.root, parts, extra.signal);
-            local.installed = inst.installed;
-            if (inst.failed.length) local.install_failed = inst.failed;
+            local.install_failed = parts.map((part) => ({ part, code: "parts_assets_unsupported", error: "The current API does not serve installable part assets; existing libraries were kept." }));
           }
         } catch (err) {
           if (!(err instanceof RefusalError)) throw err;

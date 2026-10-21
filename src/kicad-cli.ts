@@ -147,6 +147,25 @@ const MAX_FINDINGS = 100;
 type RawItem = { description?: unknown; pos?: { x?: unknown; y?: unknown } };
 type RawViolation = { description?: unknown; type?: unknown; severity?: unknown; items?: unknown };
 
+function invalidReport(kind: "drc" | "erc", file: string, kicad: string): RefusalError {
+  return new RefusalError(
+    refusal("kicad_report_invalid", `KiCad ${kicad} did not provide a readable ${kind.toUpperCase()} report for ${file}.`, "No passing check was established. Open the project in KiCad and rerun the check; update this client if KiCad's report format has changed.", { kicad, file })
+  );
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** A missing or unfamiliar report must never turn into zero findings. */
+function violations(value: unknown): value is RawViolation[] {
+  return Array.isArray(value) && value.every((v) =>
+    record(v) && typeof v.description === "string" && typeof v.type === "string" &&
+    (v.severity === "error" || v.severity === "warning" || v.severity === "ignore") &&
+    (v.items === undefined || (Array.isArray(v.items) && v.items.every((i) => record(i))))
+  );
+}
+
 function finding(v: RawViolation, sheet?: string): Finding {
   const items = Array.isArray(v.items) ? (v.items as RawItem[]) : [];
   return {
@@ -164,19 +183,23 @@ function finding(v: RawViolation, sheet?: string): Finding {
 
 /** KiCad's DRC / ERC JSON report as findings, errors first. */
 export function readReport(kind: "drc" | "erc", json: unknown, file: string, kicad: string): CheckReport {
-  const j = (json ?? {}) as { violations?: unknown; unconnected_items?: unknown; schematic_parity?: unknown; sheets?: unknown };
+  if (!record(json)) throw invalidReport(kind, file, kicad);
+  const j = json;
   const all: Finding[] = [];
   const counts: CheckReport["counts"] = { errors: 0, warnings: 0 };
   if (kind === "drc") {
-    const v = Array.isArray(j.violations) ? (j.violations as RawViolation[]) : [];
-    const u = Array.isArray(j.unconnected_items) ? (j.unconnected_items as RawViolation[]) : [];
-    const p = Array.isArray(j.schematic_parity) ? (j.schematic_parity as RawViolation[]) : [];
+    if (!violations(j.violations) || !violations(j.unconnected_items) || !violations(j.schematic_parity)) throw invalidReport(kind, file, kicad);
+    const v = j.violations;
+    const u = j.unconnected_items;
+    const p = j.schematic_parity;
     all.push(...v.map((x) => finding(x)), ...u.map((x) => finding(x)), ...p.map((x) => finding(x)));
     counts.unconnected = u.length;
     counts.parity = p.length;
   } else {
-    for (const s of Array.isArray(j.sheets) ? (j.sheets as Array<{ path?: unknown; violations?: unknown }>) : []) {
-      for (const x of Array.isArray(s.violations) ? (s.violations as RawViolation[]) : []) all.push(finding(x, String(s.path ?? "/")));
+    if (!Array.isArray(j.sheets)) throw invalidReport(kind, file, kicad);
+    for (const s of j.sheets) {
+      if (!record(s) || typeof s.path !== "string" || !violations(s.violations)) throw invalidReport(kind, file, kicad);
+      for (const x of s.violations) all.push(finding(x, s.path));
     }
   }
   for (const f of all) {
@@ -186,6 +209,20 @@ export function readReport(kind: "drc" | "erc", json: unknown, file: string, kic
   const rank = (s: string) => (s === "error" ? 0 : s === "warning" ? 1 : 2);
   all.sort((a, b) => rank(a.severity) - rank(b.severity));
   return { kind, source: "kicad-cli", kicad, file, passed: counts.errors === 0, counts, findings: all.slice(0, MAX_FINDINGS), truncated: Math.max(0, all.length - MAX_FINDINGS) };
+}
+
+/** Exit status and complete report validation both precede any success. */
+export function readCheckResult(kind: "drc" | "erc", result: RunResult, text: string | null, file: string, cli: KicadCli): CheckReport {
+  // We do not request --exit-code-violations: findings are in the JSON and
+  // successful DRC/ERC runs return zero even when they find violations.
+  if (result.code !== 0 || text === null) throw failed(kind === "drc" ? "run DRC on the board" : "run ERC on the schematic", result, cli);
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw invalidReport(kind, file, cli.version);
+  }
+  return readReport(kind, json, file, cli.version);
 }
 
 async function tmpDir(): Promise<string> {
@@ -201,8 +238,7 @@ export async function runCheck(kind: "drc" | "erc", file: string, signal?: Abort
     const args = kind === "drc" ? ["pcb", "drc", "--format", "json", "--severity-all", "--units", "mm", "-o", out, file] : ["sch", "erc", "--format", "json", "--severity-all", "--units", "mm", "-o", out, file];
     const r = await run(cli.bin, args, { signal, cwd: path.dirname(file) });
     const text = await fsp.readFile(out, "utf8").catch(() => null);
-    if (text === null) throw failed(kind === "drc" ? "run DRC on the board" : "run ERC on the schematic", r, cli);
-    return readReport(kind, JSON.parse(text), path.basename(file), cli.version);
+    return readCheckResult(kind, r, text, path.basename(file), cli);
   } finally {
     await fsp.rm(dir, { recursive: true, force: true });
   }

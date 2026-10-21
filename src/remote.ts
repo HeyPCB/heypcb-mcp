@@ -189,17 +189,17 @@ export class Remote {
         if (err instanceof McpError) {
           if (err.code === ErrorCode.RequestTimeout) {
             return refusalResult(
-              refusal(
+              this.callFailure(name, args, err, refusal(
                 "remote_timeout",
                 `HeyPCB's ${name} did not answer within ${Math.round(this.config.callTimeoutMs / 60000)} minutes.`,
                 "It may still be running on HeyPCB: read its state (for a turn, call wait_for_turn; for a board, get_board) before calling it again.",
                 { retryable: true }
-              )
+              ))
             );
           }
           if (err.code === ErrorCode.ConnectionClosed) {
             await this.reset();
-            return refusalResult(this.translate(err));
+            return refusalResult(this.callFailure(name, args, err));
           }
           throw err; // the remote server's own JSON-RPC error, passed through
         }
@@ -211,9 +211,31 @@ export class Remote {
         // A 4xx is an answer (the connection is fine); anything else drops the link so the next call reconnects.
         const answered = err instanceof StreamableHTTPError && typeof err.code === "number" && err.code >= 400 && err.code < 500;
         if (!answered && !(err instanceof RefusalError)) await this.reset();
-        return refusalResult(this.translate(err));
+        return refusalResult(this.callFailure(name, args, err));
       }
     }
+  }
+
+  /** A dispatched write whose reply was lost may already have changed the board. */
+  private callFailure(name: string, args: Record<string, unknown> | undefined, err: unknown, failure = this.translate(err)): Refusal {
+    const readOnly = this.tools?.find((t) => t.name === name)?.annotations?.readOnlyHint === true;
+    // The server's own refusal is an answer, as is an HTTP 4xx. Keep its
+    // recovery verbatim. A gateway 5xx, disconnect or timeout proves nothing
+    // about whether a tool executed, even when reconnecting is safe.
+    const answered = err instanceof RefusalError || (err instanceof StreamableHTTPError && (
+      asRefusal(bodyOf(err), err.code) !== null || (typeof err.code === "number" && err.code >= 400 && err.code < 500)
+    ));
+    if (readOnly || answered) return failure;
+    const project = typeof args?.project === "string" ? args.project : null;
+    const read = project
+      ? { tool: "get_design_summary", args: { project } }
+      : { tool: "list_projects", args: {} };
+    return refusal(
+      "write_outcome_unknown",
+      `HeyPCB's reply to ${name} was lost; the call may already have changed the board or started a run.`,
+      `Do not repeat ${name}. First call ${read.tool} with ${JSON.stringify(read.args)} to inspect what landed${project ? "; get_board reads the board's stage and checks" : " and find any project it created"}. If a run returned a turn, job or handle earlier, collect that same run. Only send a new write after its outcome is known.`,
+      { tool: name, ...(project ? { project } : {}), cause: failure.code, inspectWith: read }
+    );
   }
 
   /** A failure as a refusal the agent can act on. */

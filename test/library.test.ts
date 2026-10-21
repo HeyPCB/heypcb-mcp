@@ -146,3 +146,17 @@ test("parts come in the project's own KiCad format, and a part only available ne
   assert.deepEqual(r2.installed.map((i) => i.part), ["C1525"]);
   assert.doesNotMatch(await fsp.readFile(path.join(newer.root, "heypcb.kicad_sym"), "utf8"), /RP2040/);
 });
+
+
+test("library namespace collisions and malformed tables refuse before any asset write", async () => {
+  for (const table of [
+    '(sym_lib_table (lib (name "heypcb")(type "KiCad")(uri "/other/library")))',
+    '(not_a_library_table)',
+  ]) {
+    const {ctx:c,root} = await ctx();
+    await fsp.writeFile(path.join(root,"sym-lib-table"),table);
+    await assert.rejects(installParts(c,root,["C2040"]), (e:any) => ["library_namespace_taken","library_unreadable"].includes(e.refusal?.code));
+    assert.equal(await fsp.readFile(path.join(root,"sym-lib-table"),"utf8"),table);
+    for (const rel of ["heypcb.kicad_sym","heypcb.pretty","heypcb.3dshapes"]) await assert.rejects(fsp.stat(path.join(root,rel)));
+  }
+});

@@ -217,3 +217,21 @@ export async function writeInside(root: string, rel: string, data: Uint8Array): 
   })());
   return saved.path;
 }
+
+/** Existing workspace paths are never read or removed through symlinked parents. */
+export async function pathInside(root: string, rel: string): Promise<string> {
+  const parts = rel.split("/");
+  if (!rel || path.isAbsolute(rel) || /^[A-Za-z]:/.test(rel) || /[\\\x00-\x1f\x7f]/.test(rel) || parts.some((p) => !p || p === "." || p === "..")) {
+    throw new RefusalError(refusal("unsafe_path", "A workspace path is not project-relative.", "Nothing was changed; reopen a valid KiCad project."));
+  }
+  let cur = await fsp.realpath(root);
+  for (const part of parts) {
+    cur = path.join(cur, part);
+    try {
+      if ((await fsp.lstat(cur)).isSymbolicLink()) throw new RefusalError(refusal("symlink_escape", `${rel} passes through a symbolic link.`, "Replace the link with a file or folder inside the project."));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
+  return cur;
+}
