@@ -87,6 +87,13 @@ test("the server's file name is reduced to one safe name", () => {
   assert.equal(safeFileName("", "f.zip"), "f.zip");
   assert.equal(safeFileName("..", "f.zip"), "f.zip");
   assert.equal(safeFileName("CON.txt", "f.zip"), "_CON.txt");
+  const long = safeFileName("板".repeat(150) + ".zip", "f.zip");
+  assert.ok(Buffer.byteLength(long) <= 200, `${Buffer.byteLength(long)} bytes`);
+  assert.ok(long.endsWith(".zip"));
+  const emoji = safeFileName("😀".repeat(120) + ".zip", "f.zip");
+  assert.equal(Buffer.from(emoji, "utf8").toString("utf8"), emoji); // no half of a character left over
+  assert.ok(safeFileName("e\u0301".repeat(80) + ".zip", "f.zip").endsWith("e\u0301.zip")); // the accent stays on its letter
+  assert.ok(safeFileName("board." + "x".repeat(250), "f.zip").length > 150); // a long tail is name, not extension
   assert.equal(dispositionName('attachment; filename="led blinker-gerbers.zip"'), "led blinker-gerbers.zip");
   assert.equal(dispositionName("attachment; filename*=UTF-8''r%C3%A9v%20A.zip; filename=\"rev A.zip\""), "rév A.zip");
   assert.equal(dispositionName("attachment; filename=plain.csv"), "plain.csv");
