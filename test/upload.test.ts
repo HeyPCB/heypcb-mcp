@@ -7,10 +7,11 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { promises as fsp } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { Auth } from "../src/auth.ts";
 import { CredentialStore } from "../src/credentials.ts";
-import { collectProject, locateProject } from "../src/kicad-files.ts";
+import { collectProject, locateProject, tilde } from "../src/kicad-files.ts";
 import { uploadKicadProject } from "../src/local-tools.ts";
 import { RefusalError } from "../src/refusal.ts";
 import { buildZip } from "../src/zip.ts";
@@ -203,4 +204,11 @@ test("a 503 that wrote nothing is sent again with the SAME key; a timeout is nev
   assert.equal(refused.isError, true);
   assert.equal((refused.structuredContent as { code: string }).code, "project_limit");
   assert.equal((refused.structuredContent as { fix: string }).fix, "Upgrade in Settings → Plan & billing.");
+});
+
+test("tilde shortens only paths inside the home folder", () => {
+  const home = os.homedir();
+  assert.equal(tilde(path.join(home, "boards")), path.join("~", "boards"));
+  assert.equal(tilde(home), "~");
+  assert.equal(tilde(home + "-other" + path.sep + "boards"), home + "-other" + path.sep + "boards");
 });
