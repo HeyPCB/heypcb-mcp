@@ -38,6 +38,8 @@ Environment:
   HEYPCB_MCP_URL     the remote MCP server (default https://api.heypcb.ai/mcp)
   HEYPCB_CONFIG_DIR  where the sign-in is stored (default ~/.config/heypcb,
                      %APPDATA%\\heypcb on Windows)
+  HEYPCB_MCP_TIMEOUT_MS  how long one remote call may run without progress,
+                     in ms, at least 1000 (default 10 minutes)
 `;
 
 /**

@@ -8,6 +8,8 @@
  * - `HEYPCB_WEB_BASE` where people open boards (default: the API base without
  *   its `api.`, so https://heypcb.ai; a dev server's own origin otherwise).
  * - `HEYPCB_API_KEY`  a personal key (`hpcb_pk_…`); beats a stored sign-in.
+ * - `HEYPCB_MCP_TIMEOUT_MS` the no-progress budget for one remote call
+ *   (default 10 minutes; below 1000 is ignored).
  *
  * Plain http is refused except to a loopback address: every request carries a
  * bearer.

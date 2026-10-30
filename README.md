@@ -202,20 +202,9 @@ npx @heypcb/mcp status      who this computer is signed in as
 | `HEYPCB_API_BASE` | The API host for sign-in and the local tools. Default: the MCP URL's host, and it must be that host. |
 | `HEYPCB_WEB_BASE` | Where project links point. Default `https://heypcb.ai`. |
 | `HEYPCB_CONFIG_DIR` | Where the sign-in is stored. |
-| `HEYPCB_MCP_TIMEOUT_MS` | How long one remote call may run without progress. Default 10 minutes. |
+| `HEYPCB_MCP_TIMEOUT_MS` | How long one remote call may run without progress, in ms (at least 1000). Default 10 minutes. |
 
 </details>
-
-### Environment
-
-| Variable | Meaning |
-|---|---|
-| `HEYPCB_API_KEY` | A personal key (`hpcb_pk_…`). Used instead of a stored sign-in. |
-| `HEYPCB_MCP_URL` | The remote server. Default `https://api.heypcb.ai/mcp`. |
-| `HEYPCB_API_BASE` | The API host for sign-in and the local tools. Default: the MCP URL's host, and it must be that host. |
-| `HEYPCB_WEB_BASE` | Where project links point. Default `https://heypcb.ai`. |
-| `HEYPCB_CONFIG_DIR` | Where the sign-in is stored. |
-| `HEYPCB_MCP_TIMEOUT_MS` | How long one remote call may run without progress. Default 10 minutes. |
 
 ### What it does with your computer
 
