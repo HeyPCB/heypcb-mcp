@@ -135,10 +135,25 @@ export function safeFileName(raw: string | null | undefined, fallback: string): 
   if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(name)) name = "_" + name;
   if (!name) name = fallback;
   if (Buffer.byteLength(name) > 200) {
-    const ext = path.extname(name).slice(0, 16);
-    name = name.slice(0, 180 - ext.length) + ext;
+    const full = path.extname(name);
+    const ext = Buffer.byteLength(full) <= 16 ? full : ""; // a 16+ byte "extension" is just more name
+    name = clipBytes(name.slice(0, name.length - ext.length), 200 - Buffer.byteLength(ext)).replace(/[. ]+$/, "") + ext;
   }
   return name;
+}
+
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/** The longest prefix of `s` that fits in `max` UTF-8 bytes, never splitting a character (é, 1️⃣, 👩‍💻). */
+function clipBytes(s: string, max: number): string {
+  let out = "";
+  let bytes = 0;
+  for (const { segment: ch } of GRAPHEMES.segment(s)) {
+    bytes += Buffer.byteLength(ch);
+    if (bytes > max) break;
+    out += ch;
+  }
+  return out;
 }
 
 /** `name`, or `name-2.ext`, `name-3.ext`… — the first that does not exist in `dir`. */
@@ -168,7 +183,7 @@ export async function writeAtomic(dir: string, name: string, chunks: AsyncIterab
   } catch (err) {
     if (err instanceof RefusalError) throw err;
   }
-  const tmp = path.join(dir, `.${name.slice(0, 60)}.${randomBytes(6).toString("hex")}.part`);
+  const tmp = path.join(dir, `.${clipBytes(name, 60)}.${randomBytes(6).toString("hex")}.part`);
   const fh = await fsp.open(tmp, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL, 0o644);
   let bytes = 0;
   try {
