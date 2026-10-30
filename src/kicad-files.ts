@@ -98,9 +98,10 @@ export function ignoreMatcher(text: string): (rel: string) => boolean {
   return (rel) => res.some((r) => r.test(rel));
 }
 
-function tilde(p: string): string {
-  const home = os.homedir();
-  return p.startsWith(home) ? "~" + p.slice(home.length) : p;
+export function tilde(p: string): string {
+  const rel = path.relative(os.homedir(), p);
+  if (rel === "") return "~";
+  return rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel) ? p : path.join("~", rel);
 }
 
 async function lexists(p: string): Promise<boolean> {
