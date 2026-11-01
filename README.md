@@ -37,7 +37,14 @@ claude mcp add --transport http heypcb https://api.heypcb.ai/mcp
 
 [![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/install-mcp?name=heypcb&config=eyJ1cmwiOiJodHRwczovL2FwaS5oZXlwY2IuYWkvbWNwIn0%3D)
 
-Codex and claude.ai (as a custom connector) take the same URL.
+claude.ai (as a custom connector) takes the same URL. Codex cannot sign in
+to the remote server (since codex-cli 0.165 it refuses an approve page on
+another origin than the issuer), so give Codex the local server below. One
+paste adds it and signs it in with a code:
+
+```sh
+codex mcp add heypcb -- npx -y @heypcb/mcp && npx -y @heypcb/mcp login
+```
 
 ### Which one do I need?
 
@@ -51,7 +58,118 @@ Codex and claude.ai (as a custom connector) take the same URL.
 | HeyPCB parts in the project's own libraries | ❌ | Awaiting the parts-assets API |
 | KiCad's own DRC/ERC and exports, free and offline | ❌ | ✅ `check_local`, `export_local` |
 
-Use the remote server unless you need one of the local tools.
+Use the remote server unless you use Codex or need one of the local tools.
+
+## Tools
+
+Both servers offer every tool below, with the same names; the local server
+adds [its own](#the-local-server-this-package). Each tool's full description
+and input schema come from the server itself, so your agent always reads the
+current ones.
+
+Seven tools run paid engine work, at what the same work costs on heypcb.ai:
+`build_board`, `ask_inky`, `answer_decision`, `check_board`, `route_board`,
+`place_parts` and `preview_placement` (`estimate` prices them first). Every
+other tool says it is free in its own description; the design and layout
+tools are rate-limited.
+
+<details>
+<summary><b>Let HeyPCB design it</b></summary>
+
+| Tool | What it does |
+|---|---|
+| `whoami` | Your HeyPCB account, plan, balance and what can run. |
+| `list_projects` | Your HeyPCB boards: id, name, last update, web link. |
+| `create_project` | Create an empty HeyPCB board project. |
+| `build_board` | Design a whole PCB from a plain-language brief: schematic, parts, placement, routing and checks. |
+| `ask_inky` | One turn of Inky, HeyPCB's design agent, on a project: a question or an edit. |
+| `wait_for_turn` | Wait for a running Inky turn and return its result. |
+| `stop_turn` | Stop a running Inky turn at its next step. |
+| `answer_decision` | Answer a decision Inky asked for (for example approve the layout). |
+| `get_board` | Board facts: layers, size, parts, nets, routed %, DRC/ERC counts, fab readiness, web link. |
+| `get_board_image` | A picture of the PCB (top or bottom), a schematic page or the 3D view. |
+| `check_board` | Run DRC, ERC and the placement check, the full verification, or the fab check, with findings. |
+| `route_board` | Autoroute the board, or only the nets you name, and return the result. |
+| `place_parts` | Re-place the board's parts. |
+| `preview_placement` | Plan a re-place on a copy and show it before anything moves. |
+| `apply_placement` | Land a previewed placement plan exactly, as one undoable change. |
+| `export` | Gerbers, KiCad project, BOM, pick-and-place or STEP as a short-lived download link. |
+| `read_design` | Read the design or a schematic/board file's text for inspection. |
+| `estimate` | The price of an operation before running it. |
+
+</details>
+
+<details>
+<summary><b>Design it yourself: parts and circuit</b></summary>
+
+| Tool | What it does |
+|---|---|
+| `search_parts` | Find real, orderable parts: LCSC stock and price, verified footprints, KiCad symbols. |
+| `get_part` | A part's pins and facts: an LCSC part card, a KiCad symbol's pins, or a part on the board. |
+| `add_parts` | Add parts to the board's design; the board places them. |
+| `remove_parts` | Delete parts from the design and the board. |
+| `set_part_value` | Change one part's value in place. |
+| `rename_part` | Rename a designator everywhere: design, nets, schematic and board. |
+| `source_parts` | Give every unsourced part an orderable LCSC part. |
+| `connect` | Connect pins (REF.PIN) into named nets. |
+| `disconnect` | Remove pins from every net they are on. |
+| `list_blocks` | HeyPCB's proven circuit blocks (USB-C power, regulators, MCU modules…). |
+| `add_block` | Add a proven circuit block to the design. |
+| `set_net_class` | Set a net class: width, clearance, current, impedance, differential pairs. |
+| `rename_net` | Rename a net. |
+| `set_no_connect` | Toggle a no-connect flag on a pin. |
+| `get_netlist` | Every net with its pins, class, drivers and current grade. |
+| `get_design_summary` | The design in one compact read: parts, nets, counts, unsourced parts. |
+| `get_schematic` | One schematic page as text, with the page list. |
+| `tidy_schematic` | Re-lay the schematic's hand-placed symbols with HeyPCB's own layout. |
+| `get_capable_pins` | Which MCU pins can carry a function (UART, I2C, SPI, PWM…) and are free. |
+
+</details>
+
+<details>
+<summary><b>Design it yourself: the board</b></summary>
+
+| Tool | What it does |
+|---|---|
+| `set_board_outline` | Set the board's outline in mm (rect, rounded, circle, polygon…), with corner mounting holes. |
+| `set_board_rules` | Set the copper layers, HDI, metal core or flex, thickness, colours and finish, and the design rules, e.g. JLCPCB's. |
+| `move_part` | Move parts on the board: x/y, a shift, beside a pin, against an edge; a routed board keeps its routing. |
+| `lock_parts` | Pin parts where they are so place_parts keeps them. |
+| `unlock_parts` | Release locked parts. |
+| `set_placement_rules` | Say where parts go: edges, locks, caps by a pin, signal chains, rings and grids. |
+| `add_ground_pour` | Pour the GND plane once routing is finished. |
+| `add_pour` | Pour copper on any net and layer, once routing is finished. |
+| `remove_pour` | Take a copper pour off the board. |
+| `add_keepout` | Keep an area clear of tracks, vias, pads, pours or parts. |
+| `rip_up_net` | Delete a net's tracks and vias so it can be routed again. |
+| `stitch_vias` | Stitch a net's pours together with a grid of vias. |
+| `tune_lengths` | Match lengths of a bus or a differential pair with meanders, kept only when DRC holds. |
+| `add_text` | Write text on the board (silkscreen, copper or mask). |
+| `add_mounting_hole` | Put a screw hole (M2–M4) on the board. |
+| `tidy_silkscreen` | Re-place every silkscreen designator beside its part, clear of pads and openings. |
+
+</details>
+
+<details>
+<summary><b>See, measure and go back</b></summary>
+
+| Tool | What it does |
+|---|---|
+| `get_board_layout` | The layout in one read: outline, layers, rules, every part's place, rotation, side and box. |
+| `preview_board` | A CAD view of the board: chosen layers, highlighted nets and parts, open connections, cropped. |
+| `inspect_net` | A net measured: status, copper per layer, vias, every open connection pin to pin. |
+| `inspect_part` | A part measured: place, edge gaps, neighbours, open pins, the nearest cap to each supply pin. |
+| `check_placement` | Grade the placement: decoupling, crystals, connectors at edges; each finding names its fix. |
+| `check_routing` | Grade routed copper against pairs, matched lengths and impedance the net classes state. |
+| `undo` | Undo the last change to a project. |
+| `list_history` | Every change the board can go back through, and what redo can put back. |
+| `restore_board` | Put the board back to any point in its history, in one guarded call. |
+| `redo` | Put back changes undo or restore_board took back. |
+| `save_checkpoint` | Save the whole board under a label, past the 50 changes the history keeps. |
+| `delete_checkpoint` | Delete a saved checkpoint. |
+| `get_guide` | The playbook for designing a board with these tools yourself. |
+
+</details>
 
 ## The local server (this package)
 
@@ -202,7 +320,7 @@ npx @heypcb/mcp status      who this computer is signed in as
 | `HEYPCB_API_BASE` | The API host for sign-in and the local tools. Default: the MCP URL's host, and it must be that host. |
 | `HEYPCB_WEB_BASE` | Where project links point. Default `https://heypcb.ai`. |
 | `HEYPCB_CONFIG_DIR` | Where the sign-in is stored. |
-| `HEYPCB_MCP_TIMEOUT_MS` | How long one remote call may run without progress, in ms (at least 1000). Default 10 minutes. |
+| `HEYPCB_MCP_TIMEOUT_MS` | How long one remote call may run without progress. Default 10 minutes. |
 
 </details>
 
@@ -230,6 +348,11 @@ npx @heypcb/mcp status      who this computer is signed in as
   https (plain http only to `localhost`). Refreshes are coordinated between
   every copy of the server running on your computer, so two agents never
   spend the same refresh token.
+- **Names your agent and this computer** to HeyPCB, so a board's history
+  can say "Sam, with Claude Code on Sams-MacBook-Pro": `login` sends this
+  computer's name (its hostname), and every request the name your agent
+  gives itself when it starts the server (Claude Code calls itself "Claude
+  Code"). With a personal key, the history names neither.
 
 If a connection drops after an edit starts, the edit may still complete.
 The server returns `write_outcome_unknown` with `inspectWith`, naming the
@@ -260,6 +383,7 @@ missing billing metadata is unmeasured, not a measured zero.
 |---|---|
 | Every tool says to sign in | Run `npx @heypcb/mcp login`, or set `HEYPCB_API_KEY`. Check with `npx @heypcb/mcp status`. |
 | Claude Desktop can't find `npx` | It starts servers with a short `PATH`. Put the full path from `which npx` in `command`. |
+| Codex says to sign in after `login` worked | Codex starts servers with a short environment. If you set `HEYPCB_CONFIG_DIR` or `XDG_CONFIG_HOME`, pass it on: `codex mcp add heypcb --env HEYPCB_CONFIG_DIR=… -- npx -y @heypcb/mcp`. |
 | Running `npx @heypcb/mcp` in a terminal prints a hint and waits | That's expected: your agent starts the server, not you. Add it to your agent as shown above. |
 | A long call stops with `remote_timeout` | It may still be running on HeyPCB. Read its state (`wait_for_turn` for a turn, `get_board` for a board) before calling it again, or raise `HEYPCB_MCP_TIMEOUT_MS`. |
 
@@ -286,26 +410,16 @@ pnpm run test:smoke    # the built file over stdio
 ```
 
 Releasing: bump `version` in `package.json` and `src/version.ts` (a test
-holds them equal). When that commit reaches `main` in heypcb-mcp, its CI
-publishes it to npm, with provenance, if that version is not on npm yet.
+holds them equal) and add the release to `CHANGELOG.md`. When that commit
+reaches `main` in heypcb-mcp, its CI publishes it to npm, with provenance, if
+that version is not on npm yet.
 
 </details>
 
-## Development
+## Changes
 
-The package has its own pnpm lockfile and is its own workspace root.
-
-```sh
-pnpm install --ignore-workspace --frozen-lockfile
-pnpm run typecheck
-pnpm run test          # node --test against a fake HeyPCB host
-pnpm run build         # dist/cli.js, one bundled file
-pnpm run test:smoke    # the built file over stdio
-```
-
-Releasing: bump `version` in `package.json` and `src/version.ts` (a test
-holds them equal). When that commit reaches `main` in heypcb-mcp, its CI
-publishes it to npm, with provenance, if that version is not on npm yet.
+What each release changed is in
+[CHANGELOG.md](https://github.com/HeyPCB/heypcb-mcp/blob/main/CHANGELOG.md).
 
 ## License
 

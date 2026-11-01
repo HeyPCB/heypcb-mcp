@@ -12,6 +12,9 @@
  *   (`readOnlyHint: false`), HeyPCB's changes pulled back. Part installation remains unavailable
  *   until the server provides a supported assets API.
  *   What changed here is added as `_meta.heypcb.local` and one text line.
+ *
+ * Every request to the remote server also names the agent driving this one,
+ * as it named itself at `initialize` (remote.ts `AGENT_HEADER`).
  */
 import path from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -25,7 +28,7 @@ import { CredentialStore } from "./credentials.ts";
 import type { InstallResult } from "./library.ts";
 import { callLocalTool, LOCAL_TOOL_NAMES, LOCAL_TOOLS, projectId } from "./local-tools.ts";
 import { RefusalError, refusalResult, type Refusal } from "./refusal.ts";
-import { Remote, type Progress } from "./remote.ts";
+import { agentHeader, Remote, type Progress } from "./remote.ts";
 import { VERSION } from "./version.ts";
 import { FileApi, NEW_SUFFIX, pull, push, Workspace, WORKSPACE_DIR, Workspaces, type PullResult, type PushResult } from "./workspace.ts";
 
@@ -150,7 +153,12 @@ export async function startServer(transport: Transport, opts: ServeOptions): Pro
   server.oninitialized = () => {
     initialized = true;
   };
-  if (remote) remote.onToolsChanged = notifyIfChanged;
+  if (remote) {
+    remote.onToolsChanged = notifyIfChanged;
+    // The agent's own name for itself, from its `initialize`, on each request
+    // from then on: HeyPCB's history says "with Claude Code on <this computer>".
+    remote.agent = () => agentHeader(server.getClientVersion());
+  }
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     if (remote && !remote.connected) await remote.tryConnect();

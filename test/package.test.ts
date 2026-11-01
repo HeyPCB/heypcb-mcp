@@ -4,6 +4,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { VERSION } from "../src/version.ts";
 import { LOCAL_TOOLS } from "../src/local-tools.ts";
+import { OFFLINE_CATALOG } from "../src/catalog.ts";
 
 const root = process.cwd();
 const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
@@ -96,4 +97,16 @@ test("the README names every local tool and the one-line installs", () => {
   for (const t of LOCAL_TOOLS) assert.ok(readme.includes(t.name), t.name);
   assert.ok(readme.includes("claude mcp add --transport http heypcb https://api.heypcb.ai/mcp"));
   assert.ok(readme.includes("claude mcp add heypcb -- npx -y @heypcb/mcp"));
+});
+
+test("the README's tool list is the remote server's: one row for every tool the offline catalog names, in its words, and no other", () => {
+  const readme = readFileSync(path.join(root, "README.md"), "utf8");
+  const start = readme.indexOf("\n## Tools\n");
+  const end = readme.indexOf("\n## The local server");
+  assert.ok(start >= 0 && end > start, "the README has a Tools section, then the local server's");
+  const rows = Object.fromEntries([...readme.slice(start, end).matchAll(/^\| `([a-z_]+)` \| (.*) \|$/gm)].map((m) => [m[1], m[2]]));
+  // The catalog's one-line summary, without what it adds while HeyPCB is not connected.
+  const summaries = Object.fromEntries(OFFLINE_CATALOG.map((t) => [t.name, String(t.description).split(" (HeyPCB is not connected yet")[0]]));
+  assert.deepEqual(Object.keys(rows).sort(), Object.keys(summaries).sort());
+  for (const [name, summary] of Object.entries(summaries)) assert.equal(rows[name], summary, name);
 });

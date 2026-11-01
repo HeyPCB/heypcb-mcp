@@ -12,6 +12,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ErrorCode, McpError, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { CredentialStore } from "../src/credentials.ts";
 import { startServer, type Running } from "../src/server.ts";
+import { agentHeader } from "../src/remote.ts";
 import { LOCAL_TOOLS } from "../src/local-tools.ts";
 import { OFFLINE_CATALOG } from "../src/catalog.ts";
 import { FAKE_TOOLS, REFUSAL, startFakeHeypcb, type Fake, type FakeOptions } from "./fake-heypcb.ts";
@@ -22,7 +23,7 @@ after(async () => {
   for (const c of cleanups.reverse()) await c().catch(() => {});
 });
 
-async function setup(env: Record<string, string>, fakeOpts: FakeOptions = {}, fake?: Fake) {
+async function setup(env: Record<string, string>, fakeOpts: FakeOptions = {}, fake?: Fake, agent: { name: string; version: string; title?: string } = { name: "test-agent", version: "1.0.0" }) {
   const f = fake ?? (await startFakeHeypcb(fakeOpts));
   if (!fake) cleanups.push(f.close);
   const config = configFor(f.mcpUrl, env);
@@ -30,7 +31,7 @@ async function setup(env: Record<string, string>, fakeOpts: FakeOptions = {}, fa
   const store = new CredentialStore(path.join(dir, "credentials.json"));
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const running: Running = await startServer(serverSide, { config, store, startupWaitMs: 5000, log: () => {}, home: dir });
-  const client = new Client({ name: "test-agent", version: "1.0.0" }, { capabilities: {} });
+  const client = new Client(agent, { capabilities: {} });
   let listChanged = 0;
   client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
     listChanged++;
@@ -74,6 +75,34 @@ test("forwards a call with the bearer and returns the result untouched", async (
     assert.equal(r.headers.authorization, `Bearer ${TEST_KEY}`);
     assert.match(String(r.headers["user-agent"]), /^heypcb-mcp\/\d+\.\d+\.\d+ \(node /);
   }
+});
+
+test("names the agent that drives it on each request, as the agent named itself at initialize", async () => {
+  const posts = (fake: Fake, method: string) =>
+    fake.requests.filter((r) => r.path === "/mcp" && r.method === "POST" && [JSON.parse(r.body.toString("utf8"))].flat().some((m: { method?: string }) => m.method === method));
+  // Claude Code's own clientInfo (its 2.1.304 binary): the title, as it gave it.
+  const claude = await setup({ HEYPCB_API_KEY: TEST_KEY }, { acceptTokens: new Set([TEST_KEY]) }, undefined, { name: "claude-code", title: "Claude Code", version: "2.1.304" });
+  await claude.client.callTool({ name: "echo", arguments: { text: "hi" } });
+  await claude.client.callTool({ name: "echo", arguments: { text: "again" } });
+  assert.equal(posts(claude.fake, "initialize")[0].headers["x-heypcb-agent"], undefined, "the link opens before the agent's own initialize: nothing to say yet");
+  assert.deepEqual(posts(claude.fake, "tools/call").map((r) => r.headers["x-heypcb-agent"]), ["Claude%20Code", "Claude%20Code"]);
+  // Gemini CLI gives no title: its name, which HeyPCB words.
+  const gemini = await setup({ HEYPCB_API_KEY: TEST_KEY }, { acceptTokens: new Set([TEST_KEY]) }, undefined, { name: "gemini-cli-mcp-client", version: "0.1.0" });
+  await gemini.client.callTool({ name: "echo", arguments: { text: "hi" } });
+  assert.deepEqual(posts(gemini.fake, "tools/call").map((r) => r.headers["x-heypcb-agent"]), ["gemini-cli-mcp-client"]);
+});
+
+test("the agent's name goes as one bounded line, percent-encoded: its title, else its name, else nothing", () => {
+  assert.equal(agentHeader({ name: "claude-code", title: "Claude Code" }), "Claude%20Code");
+  assert.equal(agentHeader({ name: "gemini-cli-mcp-client" }), "gemini-cli-mcp-client");
+  assert.equal(agentHeader({ name: "codex-mcp-client", title: " \t " }), "codex-mcp-client", "a blank title is no title");
+  const said = (info: { name?: unknown; title?: unknown }) => decodeURIComponent(agentHeader(info) ?? "");
+  assert.equal(said({ title: "Evil‮gnp.exe\n\tagent" }), "Evilgnp.exe agent", "a bidi override out, control characters one space");
+  assert.equal(said({ title: "克劳德 代码" }), "克劳德 代码");
+  assert.equal(said({ title: "a\uD800b" }), "ab", "a lone surrogate, which no header can carry, is dropped");
+  assert.equal(said({ title: "😀".repeat(100) }), "😀".repeat(80), "80 characters, never half of one");
+  assert.ok((agentHeader({ title: "😀".repeat(100) }) ?? "").length <= 1024, "inside the bound HeyPCB reads to");
+  for (const info of [undefined, {}, { name: "" }, { name: 42 }, { name: "\n\t " }]) assert.equal(agentHeader(info as never), null, JSON.stringify(info));
 });
 
 test("passes a refusal through exactly as the remote server sent it", async () => {

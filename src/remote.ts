@@ -4,6 +4,11 @@
  * transport failure into a refusal the agent can act on. It never reads or
  * changes what a tool returns: a result — a refusal included — reaches the
  * agent exactly as the remote server sent it.
+ *
+ * Every request names the agent driving this server (`AGENT_HEADER`), so
+ * HeyPCB's history can say "Sam, with Claude Code on Sams-MacBook-Pro". The
+ * remote server keeps no session, and this link opens before the agent's own
+ * `initialize`, so the name rides each request rather than our `clientInfo`.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -33,6 +38,32 @@ export type ForwardOptions = {
 /** How long a failed connect is remembered before a tools/list tries again. */
 const RETRY_LIST_AFTER_MS = 5_000;
 const CONNECT_TIMEOUT_MS = 20_000;
+
+/** The agent driving this server, named to HeyPCB's remote MCP server. */
+export const AGENT_HEADER = "x-heypcb-agent";
+/** HeyPCB's own bound on a name a sign-in or an app gives (`device_name`, a registered client's). */
+const AGENT_NAME_MAX = 80;
+
+function oneLine(v: unknown): string {
+  if (typeof v !== "string") return "";
+  // The rule HeyPCB keeps a device's or an app's name by: control characters
+  // to spaces, format ones (a bidi override) out; a lone surrogate out too,
+  // which no header can carry.
+  const line = v.replace(/\p{Cc}+/gu, " ").replace(/[\p{Cf}\p{Cs}]+/gu, "").replace(/\s+/g, " ").trim();
+  return Array.from(line).slice(0, AGENT_NAME_MAX).join("").trimEnd();
+}
+
+/**
+ * What the agent called itself at `initialize` — its clientInfo's `title`
+ * (Claude Code: "Claude Code"), else its `name` (Gemini CLI:
+ * "gemini-cli-mcp-client") — as one line of at most 80 characters,
+ * percent-encoded (a header is bytes, and a name need not be ASCII). Null
+ * before `initialize` and for an agent that gave no name.
+ */
+export function agentHeader(info: { name?: unknown; title?: unknown } | undefined): string | null {
+  const name = oneLine(info?.title) || oneLine(info?.name);
+  return name ? encodeURIComponent(name) : null;
+}
 
 function errorText(err: unknown): string {
   if (err instanceof Error) {
@@ -65,6 +96,8 @@ export class Remote {
   instructions: string | undefined;
   /** Told when `tools` changes (connect, reconnect, the server's own list_changed). */
   onToolsChanged: (() => void) | null = null;
+  /** The agent's name as `AGENT_HEADER` sends it (`agentHeader`), read at each request; null until the agent has said. */
+  agent: (() => string | null) | null = null;
 
   constructor(config: Config, auth: Auth) {
     this.config = config;
@@ -111,7 +144,7 @@ export class Remote {
     if (!(await this.auth.hasCredentials())) throw new RefusalError(this.auth.missing());
     const client = new Client({ name: "heypcb-mcp", version: VERSION }, { capabilities: {} });
     const transport = new StreamableHTTPClientTransport(this.config.mcpUrl, {
-      fetch: (url, init) => this.auth.fetch(url, init),
+      fetch: (url, init) => this.auth.fetch(url, this.withAgent(init)),
       requestInit: { headers: { "user-agent": this.config.userAgent } },
     });
     client.onclose = () => {
@@ -130,6 +163,15 @@ export class Remote {
     }
     this.client = client;
     return client;
+  }
+
+  /** A request's init with the agent's name added, once the agent has given one. */
+  private withAgent(init: RequestInit | undefined): RequestInit | undefined {
+    const agent = this.agent?.() ?? null;
+    if (!agent) return init;
+    const headers = new Headers(init?.headers ?? {});
+    headers.set(AGENT_HEADER, agent);
+    return { ...init, headers };
   }
 
   private async refreshTools(client: Client): Promise<void> {
