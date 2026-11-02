@@ -1,5 +1,10 @@
 # @heypcb/mcp
 
+<p align="center">
+  <img src="docs/images/board-3d.png" width="760" alt="3D view on heypcb.ai of a 40 by 20 mm board that Claude Code built through this MCP server with build_board: a USB-C connector, a 2 by 3 pin ISP header, four WS2812B RGB LEDs in a row and a push button on a green board">
+</p>
+<p align="center"><sub>Built from Claude Code with <code>build_board</code>: one brief in, a fab-ready board out (15 of 15 checks passed).</sub></p>
+
 HeyPCB for AI agents. Add HeyPCB to Claude Code, Codex, Cursor or Claude
 Desktop and design real KiCad boards from your agent: HeyPCB's server does
 the engineering (Inky's design agent, parts, placement, routing, DRC/ERC,
@@ -25,6 +30,25 @@ highlighted nets and parts, open connections), measures it with
 |---|---|---|
 | **Let HeyPCB design it** | "Build a USB-C powered board for …" | `build_board`, `get_board`, `check_board`, `export`. HeyPCB's server does the engineering: Inky's design agent, parts, placement, routing, DRC/ERC and fab checks. |
 | **Let your agent design it** | "Add an LDO and wire it to the MCU" | Parts and blocks: `search_parts`, `get_part`, `add_parts`, `add_block`, `connect`, `get_netlist`. Layout: `set_board_outline`, `set_board_rules`, `move_part`, `lock_parts`, `add_ground_pour`, `get_board_layout`. Then `check_board` until the board is fab-ready. Each finding names the call that fixes it (`fixWith`). |
+
+### On heypcb.ai
+
+The same board in the heypcb.ai editor, PCB and schematic:
+
+![The board's PCB in the heypcb.ai editor: a 40 by 20 mm two-layer board with the USB-C connector J1 at the left edge, the ISP header J2, four WS2812B LEDs D1 to D4 along the top, their capacitors, and the button SW1, all routed, with a copper pour](docs/images/board-pcb.png)
+
+![The board's schematic in the heypcb.ai editor: a USB-C power block with its two 5.1k CC pull-downs, and the ATtiny85 block with its decoupling capacitors, the reset pull-up, the button, the ISP header and the four WS2812B LEDs in a chain](docs/images/board-schematic.png)
+
+### Change it by asking
+
+From Claude Code: the request, Claude's `ask_inky` call, and its answer
+once Inky finished:
+
+![A Claude Code session: the request to make the board 48 mm long with two M2 mounting holes at the right end, Claude's call to heypcb's Ask Inky tool with the project and that message, and, below a dashed line, Claude's answer after Inky finished: 48 by 20 mm, two 2.2 mm holes for M2 screws, parts and routing unchanged, 0 DRC errors, and a note that the last save has not been re-checked yet](docs/images/claude-code-ask-inky.png)
+
+The board before and after, at the same scale:
+
+![get_board_image's 3D render of the board before and after the change, at the same scale: before, 40 by 20 mm; after, 48 by 20 mm, with the same parts in the same places and two M2 mounting holes at the right end](docs/images/ask-inky-before-after.png)
 
 ## Quick start
 
@@ -149,6 +173,11 @@ tools are rate-limited.
 | `tidy_silkscreen` | Re-place every silkscreen designator beside its part, clear of pads and openings. |
 
 </details>
+
+`preview_board` shows your agent what it built. Here it highlights the
+LEDs' data chain, from the series resistor through D1 to D4:
+
+![preview_board's picture of the same board: every track dimmed, and the four nets of the WS2812B data chain, LED_DIN, LED_1_TO_2, LED_2_TO_3 and LED_3_TO_4, drawn bright cyan](docs/images/preview-board.png)
 
 <details>
 <summary><b>See, measure and go back</b></summary>
