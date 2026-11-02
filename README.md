@@ -47,11 +47,11 @@ answer once Inky finished. `ask_inky` returns while Inky is still working;
 the 7 minutes of `wait_for_turn` calls in between are cut at the dashed
 line:
 
-![A Claude Code session: the request to make the board 48 mm long with two M2 mounting holes at the right end, Claude's call to heypcb's Ask Inky tool with the project and that message, and, below a dashed line where the wait is cut, Claude's answer after Inky finished: 48 by 20 mm, two 2.2 mm holes for M2 screws, parts and routing unchanged, 0 DRC errors, and a note that the last save has not been re-checked yet](https://raw.githubusercontent.com/HeyPCB/heypcb-mcp/main/docs/images/claude-code-ask-inky.png)
+![A Claude Code session: the request to make the board 48 mm long with two M2 mounting holes at the right end, Claude's call to heypcb's Ask Inky tool with the project and that message, and, below a dashed line where the wait is cut, Claude's answer after Inky finished: 48 by 20 mm, two 2.2 mm holes for M2 screws, the parts where they were, all 51 connections routed with 3 more vias, 0 DRC errors, and a note that the last save has not been re-checked yet. The board's id is blanked out](https://raw.githubusercontent.com/HeyPCB/heypcb-mcp/main/docs/images/claude-code-ask-inky.png)
 
 The board before and after, at the same scale:
 
-![get_board_image's 3D render of the board before and after the change, at the same scale: before, 40 by 20 mm; after, 48 by 20 mm, with the same parts in the same places and two M2 mounting holes at the right end](https://raw.githubusercontent.com/HeyPCB/heypcb-mcp/main/docs/images/ask-inky-before-after.png)
+![get_board_image's 3D render of the board before and after the change, at the same scale: before, 40 by 20 mm; after, 48 by 20 mm, with the same parts in the same places and two M2 mounting holes at the right end, where the copper pour still stops at the old 40 mm edge](https://raw.githubusercontent.com/HeyPCB/heypcb-mcp/main/docs/images/ask-inky-before-after.png)
 
 ## Quick start
 
@@ -177,11 +177,6 @@ tools are rate-limited.
 
 </details>
 
-`preview_board` shows your agent what it built. Here it highlights the
-LEDs' data chain, from the series resistor through D1 to D4:
-
-![preview_board's picture of the same board: every track dimmed, and the four nets of the WS2812B data chain, LED_DIN, LED_1_TO_2, LED_2_TO_3 and LED_3_TO_4, drawn bright cyan](https://raw.githubusercontent.com/HeyPCB/heypcb-mcp/main/docs/images/preview-board.png)
-
 <details>
 <summary><b>See, measure and go back</b></summary>
 
@@ -202,6 +197,11 @@ LEDs' data chain, from the series resistor through D1 to D4:
 | `get_guide` | The playbook for designing a board with these tools yourself. |
 
 </details>
+
+`preview_board` shows your agent what it built. Here it highlights the
+LEDs' data chain, from the series resistor through D1 to D4:
+
+![preview_board's picture of the same board: every track dimmed, and the four nets of the WS2812B data chain, LED_DIN, LED_1_TO_2, LED_2_TO_3 and LED_3_TO_4, drawn bright cyan](https://raw.githubusercontent.com/HeyPCB/heypcb-mcp/main/docs/images/preview-board.png)
 
 ## The local server (this package)
 
