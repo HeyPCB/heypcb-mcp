@@ -5,6 +5,35 @@ remote server and change there, whichever version of this package you run.
 Each release also lists the tool changes since the previous release that an
 agent will notice.
 
+## 0.1.8
+
+### This package
+
+- **`fast-uri` 3.1.9.** The copy of `fast-uri` bundled with the MCP SDK's
+  JSON Schema validator moves from 3.1.8 to 3.1.9. The new version fixes
+  four advisories: GHSA-wjr9-j795-jxcr, GHSA-w74x-v6f9-j3xg,
+  GHSA-xhq7-xmqj-769h and GHSA-333x-w4r6-6crp. None of them could be reached
+  in this package. `fast-uri` only resolves references inside tool schemas
+  from HeyPCB's own server, and the package checks hosts with the standard
+  `URL` parser. Nothing else in the package changed.
+
+### HeyPCB's remote server
+
+- `set_board_rules` accepts smaller rules, down to what JLCPCB builds at all
+  for the board's layer count. On 1–2 layers the floor is 0.10 mm track and
+  clearance and a 0.25/0.15 mm via with a 0.05 mm ring. On 4 or more layers
+  it is 0.09 mm track and clearance, with the same via. The floor was
+  0.127 mm with a 0.45/0.30 mm via. A value under the floor is still refused
+  (`below_fab_floor`), never clamped. `fab: "jlcpcb"` still applies 0.127 mm
+  and 0.45/0.30 mm vias. At JLCPCB, 0.10 mm track and space is still
+  standard price. Two of the new values cost more there. A via under 0.45 mm
+  across with a 0.20–0.25 mm hole, or any via hole under 0.20 mm, is a paid
+  option. 0.09 mm track and space adds 20% to the order on 4–8 layers and
+  30% on 10 or more.
+- `check_board` handles a clearance finding between pads of the same footprint
+  differently. It now suggests `set_board_rules` with a clearance as low as
+  0.10 mm, where it used to stop at 0.127 mm.
+
 ## 0.1.7
 
 ### This package
