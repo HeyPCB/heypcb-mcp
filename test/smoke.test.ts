@@ -5,7 +5,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, promises as fsp } from "node:fs";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -81,4 +81,25 @@ test("dist/cli.js with no sign-in still starts, and every tool says how to sign 
   const res = await client.callTool({ name: "build_board", arguments: { brief: "an LED blinker" } });
   assert.equal(res.isError, true);
   assert.equal((res.structuredContent as { code: string }).code, "sign_in_required");
+});
+
+test("dist/cli.js saves long UTF-8 export filenames over stdio", { skip: !existsSync(cli) && "dist/cli.js is not built" }, async () => {
+  const body = Buffer.from("PK\u0003\u0004unicode gerbers");
+  const raw = "板".repeat(150) + ".zip";
+  const fake = await startFakeHeypcb({ acceptTokens: new Set([TEST_KEY]), exportAnswer: {
+    status: 200, body, headers: { "content-type": "application/zip", "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(raw)}` },
+  } });
+  closers.push(fake.close);
+  const client = await run({ HEYPCB_MCP_URL: fake.mcpUrl, HEYPCB_API_KEY: TEST_KEY });
+  const dir = tmpDir();
+  const res = await client.callTool({ name: "save_export", arguments: { project: "prj_1", kind: "gerbers", dir } });
+  assert.equal(res.isError, undefined, JSON.stringify(res.structuredContent));
+  const out = res.structuredContent as { path: string; bytes: number };
+  const name = path.basename(out.path);
+  assert.equal(name, "板".repeat(65) + ".zip");
+  assert.equal(Buffer.byteLength(name), 199);
+  assert.equal(out.path, path.join(dir, name));
+  assert.equal(out.bytes, body.length);
+  assert.deepEqual(await fsp.readFile(out.path), body);
+  assert.deepEqual(await fsp.readdir(dir), [name], "no temporary file is left");
 });

@@ -10,7 +10,7 @@ import path from "node:path";
 import { Auth } from "../src/auth.ts";
 import { CredentialStore } from "../src/credentials.ts";
 import { dispositionName, projectId, saveExport } from "../src/local-tools.ts";
-import { resolveTargetDir, safeFileName } from "../src/safe-path.ts";
+import { resolveTargetDir, safeFileName, writeAtomic } from "../src/safe-path.ts";
 import { RefusalError } from "../src/refusal.ts";
 import { startFakeHeypcb } from "./fake-heypcb.ts";
 import { configFor, TEST_KEY, tmpDir } from "./helpers.ts";
@@ -104,6 +104,74 @@ async function exportFake(answer?: { status: number; headers: Record<string, str
   await fsp.mkdir(home, { recursive: true });
   return { fake, home, ctx: { config, auth: new Auth(config, new CredentialStore(path.join(tmpDir(), "c.json"))), home } };
 }
+
+test("oversized export names fit 200 UTF-8 bytes without splitting graphemes or repeating extensions", () => {
+  for (const [raw, expected] of [
+    ["a".repeat(196) + ".zip", "a".repeat(196) + ".zip"],
+    ["a".repeat(197) + ".zip", "a".repeat(196) + ".zip"],
+    ["板".repeat(150) + ".zip", "板".repeat(65) + ".zip"],
+    ["😀".repeat(120) + ".zip", "😀".repeat(49) + ".zip"],
+    ["e\u0301".repeat(80) + ".zip", "e\u0301".repeat(65) + ".zip"],
+    ["a" + "e\u0301".repeat(80) + ".zip", "a" + "e\u0301".repeat(65) + ".zip"],
+    ["🇮🇳".repeat(40) + ".zip", "🇮🇳".repeat(24) + ".zip"],
+    ["板".repeat(100) + ".abcdefghijklmno", "板".repeat(61) + ".abcdefghijklmno"],
+    ["板".repeat(100) + ".数据", "板".repeat(64) + ".数据"],
+    ["board." + "x".repeat(250), "board." + "x".repeat(194)],
+    ["board." + "界".repeat(70), "board." + "界".repeat(64)],
+    ["板".repeat(100), "板".repeat(66)],
+    ["e" + "\u0301".repeat(300) + ".zip", "export.zip"],
+    ["CONe" + "\u0301".repeat(300) + ".zip", "_CON.zip"],
+    ["a. " + "e" + "\u0301".repeat(300) + ".zip", "a.zip"],
+  ]) {
+    const name = safeFileName(raw, "f.zip");
+    assert.equal(name, expected, `input: ${Buffer.byteLength(raw)} bytes`);
+    assert.ok(Buffer.byteLength(name) <= 200, `${Buffer.byteLength(name)} bytes`);
+    assert.equal(Buffer.from(name, "utf8").toString("utf8"), name, "no surrogate is split");
+  }
+});
+
+test("atomic export writes use a byte-bounded temporary name with whole accents", async () => {
+  const dir = tmpDir();
+  const name = "a" + "e\u0301".repeat(65) + ".zip";
+  const body = Buffer.from("export bytes");
+  async function* chunks() {
+    const files = await fsp.readdir(dir);
+    assert.equal(files.length, 1);
+    const match = /^\.(.*)\.[0-9a-f]{12}\.part$/.exec(files[0]);
+    assert.ok(match, files[0]);
+    assert.ok(Buffer.byteLength(match[1]) <= 60);
+    assert.equal(match[1], "a" + "e\u0301".repeat(19));
+    yield body;
+  }
+  const out = await writeAtomic(dir, name, chunks());
+  assert.equal(out.path, path.join(dir, name));
+  assert.equal(out.bytes, body.length);
+  assert.deepEqual(await fsp.readFile(out.path), body);
+  assert.deepEqual(await fsp.readdir(dir), [name], "the temporary file was renamed");
+});
+
+test("save_export writes long UTF-8 server filenames, numbers copies and preserves overwrite behavior", async () => {
+  const body = Buffer.from("PK\u0003\u0004unicode gerbers");
+  const raw = "板".repeat(150) + ".zip";
+  const { ctx, home } = await exportFake({ status: 200, headers: {
+    "content-type": "application/zip",
+    "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(raw)}`,
+  }, body });
+  const dir = path.join(home, "fab");
+  for (const [overwrite, expected] of [
+    [false, "板".repeat(65) + ".zip"],
+    [false, "板".repeat(65) + "-2.zip"],
+    [true, "板".repeat(65) + ".zip"],
+  ] as const) {
+    const res = await saveExport(ctx, { project: "prj_1", kind: "gerbers", dir, overwrite });
+    assert.equal(res.isError, undefined, JSON.stringify(res.structuredContent));
+    const out = res.structuredContent as { path: string; bytes: number };
+    assert.equal(out.path, path.join(dir, expected));
+    assert.equal(out.bytes, body.length);
+    assert.deepEqual(await fsp.readFile(out.path), body);
+  }
+  assert.deepEqual((await fsp.readdir(dir)).sort(), ["板".repeat(65) + ".zip", "板".repeat(65) + "-2.zip"].sort());
+});
 
 test("saves the export atomically under the server's name, never over an existing file unless asked", async () => {
   const body = Buffer.from("PK\u0003\u0004gerbers");
