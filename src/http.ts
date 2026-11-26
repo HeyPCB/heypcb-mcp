@@ -56,7 +56,10 @@ export async function* chunksOf(body: ReadableStream<Uint8Array> | null): AsyncI
 /** `signal` or a timeout, whichever comes first (AbortSignal.any is Node 20+). */
 export function anySignal(signal: AbortSignal, ms: number): AbortSignal {
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(new DOMException("The operation timed out.", "TimeoutError")), ms);
+  const timer = setTimeout(() => {
+    signal.removeEventListener("abort", stop);
+    ctl.abort(new DOMException("The operation timed out.", "TimeoutError"));
+  }, ms);
   const stop = () => {
     clearTimeout(timer);
     ctl.abort(signal.reason);
