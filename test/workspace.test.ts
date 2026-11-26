@@ -14,6 +14,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { CredentialStore } from "../src/credentials.ts";
 import { startServer } from "../src/server.ts";
 import { Auth } from "../src/auth.ts";
+import { RefusalError } from "../src/refusal.ts";
 import { FileApi, Workspace, pull, ignoreInGit, WORKSPACE_DIR } from "../src/workspace.ts";
 import { startFakeHeypcb, type FakeOptions } from "./fake-heypcb.ts";
 import { configFor, copyFixture, TEST_KEY, tmpDir } from "./helpers.ts";
@@ -72,6 +73,79 @@ test("open_kicad_project uploads once, writes the binding and .gitignore, and re
   assert.equal(sc(again).project.id, id);
   assert.equal(fake.requests.filter((r) => r.path === "/v1/projects/import").length, 1, "no second project");
   assert.deepEqual(puts(fake), [], "nothing changed, nothing sent");
+});
+
+test("workspace loading distinguishes missing files from filesystem read failures", async (t) => {
+  const root = tmpDir();
+  assert.equal(await Workspace.load(root), null);
+  await fsp.mkdir(path.join(root, WORKSPACE_DIR));
+  assert.equal(await Workspace.load(root), null);
+  await fsp.writeFile(Workspace.file(root), "existing workspace bytes");
+  let code = "EACCES";
+  t.mock.method(fsp, "readFile", async () => {
+    throw Object.assign(new Error("simulated filesystem read failure"), { code });
+  });
+  for (code of ["EACCES", "EPERM", "EIO", "EISDIR"]) {
+    await assert.rejects(Workspace.load(root), (err: unknown) => {
+      assert.ok(err instanceof RefusalError);
+      assert.equal(err.refusal.code, "workspace_unreadable");
+      assert.ok(err.refusal.error.includes(code));
+      assert.match(err.refusal.fix, /permissions|filesystem/i);
+      assert.doesNotMatch(err.refusal.fix, /rebind|upload/i);
+      return true;
+    });
+  }
+});
+
+test("unreadable workspaces refuse reopening without another import or a changed binding", async (t) => {
+  const { fake, root, id, call } = await bound();
+  const file = Workspace.file(root);
+  const original = await fsp.readFile(file, "utf8");
+  const board = await read(root, "blinky.kicad_pcb");
+  const requests = fake.requests.length;
+  const readFile = fsp.readFile;
+  let code = "EACCES";
+  const mocked = t.mock.method(fsp, "readFile", async (...args: Parameters<typeof fsp.readFile>) => {
+    if (args[0] === file) throw Object.assign(new Error("workspace read failed"), { code });
+    return readFile(...args);
+  });
+  for (code of ["EACCES", "EIO"]) {
+    const result = await call("open_kicad_project", { path: root });
+    assert.equal(result.isError, true);
+    assert.equal(sc(result).code, "workspace_unreadable");
+    assert.ok(sc(result).error.includes(code));
+    assert.equal(fake.requests.length, requests, "no requests after the binding read fails");
+    assert.equal(await readFile(file, "utf8"), original, "the original binding is unchanged");
+    assert.equal(await read(root, "blinky.kicad_pcb"), board);
+  }
+  mocked.mock.restore();
+  const reopened = await call("open_kicad_project", { path: root });
+  assert.equal(reopened.isError, undefined, JSON.stringify(reopened.structuredContent));
+  assert.equal(sc(reopened).binding, "existing");
+  assert.equal(sc(reopened).project.id, id);
+  assert.equal(fake.requests.filter((r) => r.path === "/v1/projects/import").length, 1);
+});
+
+test("explicit rebinding still creates a new project when the old workspace cannot be read", async (t) => {
+  const { fake, root, id, call } = await bound();
+  const file = Workspace.file(root);
+  const readFile = fsp.readFile;
+  let attemptedReads = 0;
+  const mocked = t.mock.method(fsp, "readFile", async (...args: Parameters<typeof fsp.readFile>) => {
+    if (args[0] === file) {
+      attemptedReads++;
+      throw Object.assign(new Error("workspace read failed"), { code: "EACCES" });
+    }
+    return readFile(...args);
+  });
+  const result = await call("open_kicad_project", { path: root, rebind: true });
+  assert.equal(result.isError, undefined, JSON.stringify(result.structuredContent));
+  assert.equal(sc(result).binding, "new");
+  assert.notEqual(sc(result).project.id, id);
+  assert.equal(attemptedReads, 0, "explicit rebinding does not load the old workspace");
+  assert.equal(fake.requests.filter((r) => r.path === "/v1/projects/import").length, 2);
+  mocked.mock.restore();
+  assert.equal(JSON.parse(await fsp.readFile(file, "utf8")).projectId, sc(result).project.id);
 });
 
 test("sync round trip: an edit here goes up before the call, HeyPCB's change comes back after it, with a backup", async () => {
