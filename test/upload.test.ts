@@ -7,6 +7,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { promises as fsp } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { Auth } from "../src/auth.ts";
 import { CredentialStore } from "../src/credentials.ts";
@@ -107,6 +108,39 @@ test("finds the project from its folder, a parent folder, or one of its files", 
   assert.deepEqual(await locateProject(path.join(root, "board.kicad_pcb")), { root, stem: "board" });
   const home = path.dirname(path.dirname(root));
   assert.deepEqual(await locateProject("~/" + path.relative(home, root), home), { root, stem: "board" });
+});
+
+test("project discovery refusals shorten only paths inside the home folder", async (t) => {
+  const base = tmpDir();
+  const home = path.join(base, "home");
+  t.mock.method(os, "homedir", () => home);
+  for (const [input, displayed] of [
+    [home, "~"],
+    [path.join(home, "boards", "project"), path.join("~", "boards", "project")],
+    [home + "-other" + path.sep + "board", home + "-other" + path.sep + "board"],
+    [path.join(base, "elsewhere", "board"), path.join(base, "elsewhere", "board")],
+    [path.join(home, "..drafts", "board"), path.join("~", "..drafts", "board")],
+  ]) {
+    await assert.rejects(locateProject(input), (err: unknown) => {
+      assert.ok(err instanceof RefusalError);
+      assert.equal(err.refusal.code, "not_found");
+      assert.equal(err.refusal.error, `${displayed} does not exist on this computer.`);
+      return true;
+    });
+  }
+});
+
+test("collection refusals retain outside paths sharing the home-folder prefix", async (t) => {
+  const home = path.join(tmpDir(), "home");
+  t.mock.method(os, "homedir", () => home);
+  const root = home + "-other";
+  await fsp.mkdir(root);
+  await assert.rejects(collectProject(root, "board"), (err: unknown) => {
+    assert.ok(err instanceof RefusalError);
+    assert.equal(err.refusal.code, "no_board");
+    assert.equal(err.refusal.error, `${path.join(root, "board")} has no .kicad_pcb and no .kicad_sch to upload.`);
+    return true;
+  });
 });
 
 test("two projects in one folder are refused with the candidates", async () => {
