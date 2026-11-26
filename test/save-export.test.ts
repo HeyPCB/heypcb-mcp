@@ -96,6 +96,30 @@ test("the server's file name is reduced to one safe name", () => {
   assert.equal(projectId("../etc"), null);
 });
 
+test("project links reject malformed escapes while preserving valid project IDs", () => {
+  for (const [input, expected] of [
+    ["https://heypcb.ai/p/%", null],
+    ["https://heypcb.ai/p/%2", null],
+    ["https://heypcb.ai/p/%GG", null],
+    ["https://heypcb.ai/p/%E0%A4%A", null],
+    ["https://heypcb.ai/p/%FF", null],
+    ["https://heypcb.ai/p/%ED%A0%80", null],
+    ["prj_123", "prj_123"],
+    ["  prj_123  ", "prj_123"],
+    ["https://heypcb.ai/p/prj%5F123", "prj_123"],
+    ["https://heypcb.ai/p/prj%2D123%2Erev", "prj-123.rev"],
+    ["https://heypcb.ai/p/prj_123?tab=pcb#view", "prj_123"],
+    ["https://heypcb.ai/p/prj%5F123?tab=pcb#view", "prj_123"],
+    ["https://heypcb.ai/p/prj%2F123", null],
+    ["https://heypcb.ai/p/%25", null],
+    ["https://heypcb.ai/p/%E6%9D%BF", null],
+    ["../etc", null],
+    ["", null],
+    [null, null],
+    [123, null],
+  ] as const) assert.equal(projectId(input), expected, JSON.stringify(input));
+});
+
 async function exportFake(answer?: { status: number; headers: Record<string, string>; body: Buffer | string }) {
   const fake = await startFakeHeypcb({ acceptTokens: new Set([TEST_KEY]), exportAnswer: answer });
   closers.push(fake.close);
@@ -104,6 +128,22 @@ async function exportFake(answer?: { status: number; headers: Record<string, str
   await fsp.mkdir(home, { recursive: true });
   return { fake, home, ctx: { config, auth: new Auth(config, new CredentialStore(path.join(tmpDir(), "c.json"))), home } };
 }
+
+test("save_export refuses malformed project links before requests or directory creation", async () => {
+  const { ctx, home, fake } = await exportFake();
+  const dir = path.join(home, "not-created");
+  for (const suffix of ["%", "%2", "%GG", "%E0%A4%A", "%FF", "%ED%A0%80"]) {
+    const res = await saveExport(ctx, { project: `https://heypcb.ai/p/${suffix}`, kind: "gerbers", dir });
+    assert.equal(res.isError, true);
+    const out = res.structuredContent as { ok: boolean; code: string; fix: string };
+    assert.equal(out.ok, false);
+    assert.equal(out.code, "bad_project");
+    assert.ok(out.fix.length > 0);
+  }
+  assert.equal(fake.requests.length, 0, "invalid project links send no requests");
+  await assert.rejects(fsp.stat(dir), { code: "ENOENT" });
+  assert.deepEqual(await fsp.readdir(home), [], "argument validation leaves the destination unchanged");
+});
 
 test("oversized export names fit 200 UTF-8 bytes without splitting graphemes or repeating extensions", () => {
   for (const [raw, expected] of [
