@@ -126,17 +126,36 @@ export async function resolveTargetDir(input: unknown, opts: { home?: string; cw
   return cur;
 }
 
+const RESERVED_FILE_NAME = /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i;
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/** The longest prefix fitting `max` UTF-8 bytes, preserving whole graphemes. */
+function clipBytes(value: string, max: number): string {
+  let out = "";
+  let bytes = 0;
+  for (const { segment } of GRAPHEMES.segment(value)) {
+    bytes += Buffer.byteLength(segment);
+    if (bytes > max) break;
+    out += segment;
+  }
+  return out;
+}
+
 /** A file name from a server, made safe: one name, no folders, no control characters. */
 export function safeFileName(raw: string | null | undefined, fallback: string): string {
   let name = String(raw ?? "");
   name = name.split(/[\\/]/).pop() ?? "";
   name = name.replace(/[\p{Cc}\p{Cf}<>:"|?*]/gu, "").trim();
   name = name.replace(/^\.+/, "").replace(/[. ]+$/, "");
-  if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(name)) name = "_" + name;
+  if (RESERVED_FILE_NAME.test(name)) name = "_" + name;
   if (!name) name = fallback;
   if (Buffer.byteLength(name) > 200) {
-    const ext = path.extname(name).slice(0, 16);
-    name = name.slice(0, 180 - ext.length) + ext;
+    const full = path.extname(name);
+    const ext = Buffer.byteLength(full) <= 16 ? full : "";
+    const stem = clipBytes(name.slice(0, name.length - ext.length), 200 - Buffer.byteLength(ext)).replace(/[. ]+$/, "");
+    name = (stem || "export") + ext;
+    // Clipping before an oversized grapheme can expose a reserved basename.
+    if (RESERVED_FILE_NAME.test(name)) name = "_" + name;
   }
   return name;
 }
@@ -168,7 +187,7 @@ export async function writeAtomic(dir: string, name: string, chunks: AsyncIterab
   } catch (err) {
     if (err instanceof RefusalError) throw err;
   }
-  const tmp = path.join(dir, `.${name.slice(0, 60)}.${randomBytes(6).toString("hex")}.part`);
+  const tmp = path.join(dir, `.${clipBytes(name, 60)}.${randomBytes(6).toString("hex")}.part`);
   const fh = await fsp.open(tmp, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL, 0o644);
   let bytes = 0;
   try {
