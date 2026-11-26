@@ -95,14 +95,21 @@ export class Workspace {
     return path.join(root, WORKSPACE_DIR, WORKSPACE_FILE);
   }
 
-  /** The binding in `root`, or null when the folder is not bound. A file that does not read as one is a refusal. */
+  /** The binding in `root`, or null for a missing file. An unreadable binding is a refusal. */
   static async load(root: string): Promise<Workspace | null> {
     let text: string;
     try {
       text = await fsp.readFile(await pathInside(root, `${WORKSPACE_DIR}/${WORKSPACE_FILE}`), "utf8");
     } catch (err) {
       if (err instanceof RefusalError) throw err;
-      return null;
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw new RefusalError(
+        refusal(
+          "workspace_unreadable",
+          `HeyPCB could not read ${path.join(WORKSPACE_DIR, WORKSPACE_FILE)} in ${root} (${(err as NodeJS.ErrnoException).code ?? (err as Error).message}).`,
+          "Check the workspace file and folder permissions, or resolve the reported filesystem error, then call open_kicad_project again."
+        )
+      );
     }
     let s: WorkspaceState;
     try {
