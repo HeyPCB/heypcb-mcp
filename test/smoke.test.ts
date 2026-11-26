@@ -11,7 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { LOCAL_TOOLS } from "../src/local-tools.ts";
 import { FAKE_TOOLS, startFakeHeypcb } from "./fake-heypcb.ts";
-import { TEST_KEY, tmpDir } from "./helpers.ts";
+import { FIXTURES, TEST_KEY, tmpDir } from "./helpers.ts";
 
 const cli = path.join(process.cwd(), "dist", "cli.js");
 const closers: Array<() => Promise<void>> = [];
@@ -81,6 +81,25 @@ test("dist/cli.js with no sign-in still starts, and every tool says how to sign 
   const res = await client.callTool({ name: "build_board", arguments: { brief: "an LED blinker" } });
   assert.equal(res.isError, true);
   assert.equal((res.structuredContent as { code: string }).code, "sign_in_required");
+});
+
+test("dist/cli.js previews uploads over stdio without sign-in or remote requests", { skip: !existsSync(cli) && "dist/cli.js is not built" }, async () => {
+  const fake = await startFakeHeypcb({});
+  closers.push(fake.close);
+  const client = await run({ HEYPCB_MCP_URL: fake.mcpUrl }, ["--max-spend", "0"]);
+  const { tools } = await client.listTools();
+  const upload = tools.find((t) => t.name === "upload_kicad_project")!;
+  assert.deepEqual(upload.inputSchema.properties?.dry_run, {
+    type: "boolean", default: false, description: "Preview the upload locally without signing in, sending files or creating a project. Default false.",
+  });
+  const res = await client.callTool({ name: "upload_kicad_project", arguments: { path: path.join(FIXTURES, "blinky2"), dry_run: true } });
+  assert.equal(res.isError, undefined, JSON.stringify(res.structuredContent));
+  const out = res.structuredContent as { dry_run: boolean; preview: { files: Array<{ path: string; bytes: number }>; fileCount: number; bytes: number } };
+  assert.equal(out.dry_run, true);
+  assert.ok(out.preview.files.some((f) => f.path === "blinky.kicad_pcb" && f.bytes > 0));
+  assert.equal(out.preview.fileCount, out.preview.files.length);
+  assert.equal(out.preview.bytes, out.preview.files.reduce((n, f) => n + f.bytes, 0));
+  assert.equal(fake.requests.length, 0, "startup, tool discovery and preview need no remote requests without sign-in");
 });
 
 test("dist/cli.js saves long UTF-8 export filenames over stdio", { skip: !existsSync(cli) && "dist/cli.js is not built" }, async () => {

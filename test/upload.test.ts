@@ -1,7 +1,8 @@
 /**
  * upload_kicad_project: which files go into the zip (the KiCad plugin's own
  * list), the refusals (outside the folder, over 50 MB, several projects), and
- * the import call (multipart, Idempotency-Key, the same key on a retry).
+ * the import call (multipart, Idempotency-Key, the same key on a retry),
+ * and local-only dry-run previews of the same file collection.
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -147,26 +148,133 @@ function ctxFor(mcpUrl: string, home?: string) {
   return { config, auth: new Auth(config, new CredentialStore(path.join(tmpDir(), "c.json"))), home };
 }
 
-test("uploads the zip as multipart `file` with an Idempotency-Key, and returns the project id and web link", async () => {
+/** Include ignored files and workspace state, not just the upload's selected files. */
+async function snapshot(root: string, prefix = ""): Promise<Record<string, Buffer | null>> {
+  const out: Record<string, Buffer | null> = {};
+  for (const entry of await fsp.readdir(path.join(root, prefix), { withFileTypes: true })) {
+    const rel = path.join(prefix, entry.name);
+    if (entry.isDirectory()) {
+      out[rel] = null;
+      Object.assign(out, await snapshot(root, rel));
+    } else out[rel] = await fsp.readFile(path.join(root, rel));
+  }
+  return out;
+}
+
+test("dry_run previews the collection without authentication, network requests or file writes", async (t) => {
+  const root = await makeProject();
+  await write(root, ".heypcbignore", "libs/my.pretty/C.kicad_mod\n");
+  await write(root, ".heypcb/workspace.json", '{"keep":"existing workspace"}\n');
+  await write(root, ".gitignore", "existing-entry\n");
+  const before = await snapshot(root);
+  const config = configFor("http://127.0.0.1:9/mcp");
+  const store = new CredentialStore(path.join(tmpDir(), "credentials.json"));
+  const auth = new Auth(config, store);
+  const bearer = t.mock.method(auth, "bearer", async () => { throw new Error("Preview must not authenticate"); });
+  const network = t.mock.method(globalThis, "fetch", async () => { throw new Error("Preview must not use the network"); });
+
+  const res = await uploadKicadProject({ config, auth }, { path: root, dry_run: true });
+  assert.equal(res.isError, undefined, JSON.stringify(res.structuredContent));
+  const out = res.structuredContent as {
+    dry_run: boolean; preview: { root: string; files: Array<{ path: string; bytes: number }>; fileCount: number; bytes: number };
+    skipped: Array<{ path: string; reason: string }>; missing: Array<{ path: string; kind: string }>; note: string;
+  };
+  assert.equal(out.dry_run, true);
+  assert.equal(out.preview.root, root);
+  const expected = EXPECTED.filter((f) => f !== "libs/my.pretty/C.kicad_mod");
+  assert.deepEqual(out.preview.files, await Promise.all(expected.map(async (file) => ({ path: file, bytes: (await fsp.stat(path.join(root, file))).size }))));
+  assert.equal(out.preview.fileCount, expected.length);
+  assert.equal(out.preview.bytes, out.preview.files.reduce((n, f) => n + f.bytes, 0));
+  assert.deepEqual(out.skipped, [{ path: "libs/my.pretty/C.kicad_mod", reason: "heypcbignore" }]);
+  assert.deepEqual(out.missing, [{ path: "missing.kicad_sch", kind: "schematic" }]);
+  assert.match(out.note, /nothing was uploaded and no project was created/);
+  for (const key of ["project", "webUrl", "uploaded"]) assert.ok(!(key in out), key);
+  assert.equal(bearer.mock.callCount(), 0);
+  assert.equal(network.mock.callCount(), 0);
+  assert.deepEqual(await snapshot(root), before);
+  assert.deepEqual(await fsp.readdir(store.dir), []);
+});
+
+test("invalid dry_run values are refused before authentication or upload", async (t) => {
+  const ctx = ctxFor("http://127.0.0.1:9/mcp");
+  const bearer = t.mock.method(ctx.auth, "bearer", async () => { throw new Error("Invalid preview arguments must not authenticate"); });
+  const network = t.mock.method(globalThis, "fetch", async () => { throw new Error("Invalid preview arguments must not upload"); });
+  for (const dry_run of ["true", "false", null, 1, {}, []]) {
+    const res = await uploadKicadProject(ctx, { path: "/not-needed", dry_run });
+    assert.equal(res.isError, true);
+    assert.equal((res.structuredContent as { code: string }).code, "bad_dry_run");
+  }
+  assert.equal(bearer.mock.callCount(), 0);
+  assert.equal(network.mock.callCount(), 0);
+});
+
+for (const scenario of ["ambiguous", "unsafe", "too_large"] as const) {
+  test(`dry_run preserves collection refusals: ${scenario}`, async (t) => {
+    const root = await makeProject();
+    if (scenario === "ambiguous") await write(root, "other.kicad_pro", "{}");
+    if (scenario === "unsafe") await write(root, "board.kicad_sch", sch(["../../outside.kicad_sch"]));
+    if (scenario === "too_large") await write(root, "libs/my.kicad_sym", Buffer.alloc(51 * 1024 * 1024, 0x41));
+    const codes = { ambiguous: "several_projects", unsafe: "unsafe_path", too_large: "project_too_large" };
+    const ctx = ctxFor("http://127.0.0.1:9/mcp");
+    const bearer = t.mock.method(ctx.auth, "bearer", async () => { throw new Error("Preview must not authenticate"); });
+    const network = t.mock.method(globalThis, "fetch", async () => { throw new Error("Preview must not use the network"); });
+    const res = await uploadKicadProject(ctx, { path: root, dry_run: true });
+    assert.equal(res.isError, true);
+    assert.equal((res.structuredContent as { code: string }).code, codes[scenario]);
+    assert.equal(bearer.mock.callCount(), 0);
+    assert.equal(network.mock.callCount(), 0);
+  });
+}
+
+for (const dry_run of [undefined, false]) {
+  test(`uploads the zip unchanged with dry_run ${dry_run === undefined ? "omitted" : "false"}`, async () => {
+    const fake = await startFakeHeypcb({ acceptTokens: new Set([TEST_KEY]) });
+    closers.push(fake.close);
+    const root = await makeProject();
+    const ctx = ctxFor(fake.mcpUrl);
+    const preview = await uploadKicadProject(ctx, { path: root, dry_run: true });
+    assert.equal(fake.requests.length, 0, "preview sends nothing even when signed in");
+    const res = await uploadKicadProject(ctx, { path: root, ...(dry_run === undefined ? {} : { dry_run }) });
+    assert.equal(res.isError, undefined, JSON.stringify(res.structuredContent));
+    const out = res.structuredContent as { project: { id: string }; webUrl: string; uploaded: { files: string[] } };
+    assert.equal(out.project.id, "prj_123");
+    assert.equal(out.webUrl, `${fake.url}/p/prj_123`);
+    assert.deepEqual(out.uploaded.files, EXPECTED);
+    assert.ok(!("dry_run" in out) && !("preview" in out), "normal upload results keep their existing shape");
+    assert.deepEqual((preview.structuredContent as { preview: { files: Array<{ path: string }> } }).preview.files.map((f) => f.path), out.uploaded.files);
+
+    const req = fake.requests.find((r) => r.path === "/v1/projects/import")!;
+    assert.equal(req.headers.authorization, `Bearer ${TEST_KEY}`);
+    assert.match(String(req.headers["idempotency-key"]), /^[0-9a-f-]{36}$/);
+    const form = await new Response(new Uint8Array(req.body), { headers: { "content-type": String(req.headers["content-type"]) } }).formData();
+    assert.equal(form.get("name"), "board");
+    const file = form.get("file") as Blob & { name?: string };
+    assert.equal(file.name, "board.zip");
+    assert.equal(file.type, "application/zip");
+    assert.deepEqual([...readZip(Buffer.from(await file.arrayBuffer())).keys()], [...EXPECTED].sort());
+  });
+}
+
+test("an upload recollects files changed after a preview", async () => {
   const fake = await startFakeHeypcb({ acceptTokens: new Set([TEST_KEY]) });
   closers.push(fake.close);
   const root = await makeProject();
-  const res = await uploadKicadProject(ctxFor(fake.mcpUrl), { path: root });
-  assert.equal(res.isError, undefined, JSON.stringify(res.structuredContent));
-  const out = res.structuredContent as { project: { id: string }; webUrl: string; uploaded: { files: string[] } };
-  assert.equal(out.project.id, "prj_123");
-  assert.equal(out.webUrl, `${fake.url}/p/prj_123`);
-  assert.deepEqual(out.uploaded.files, EXPECTED);
+  const ctx = ctxFor(fake.mcpUrl);
+  await write(root, ".heypcbignore", "libs/my.pretty/C.kicad_mod\n");
+  const preview = await uploadKicadProject(ctx, { path: root, dry_run: true });
+  const before = (preview.structuredContent as { preview: { files: Array<{ path: string }> } }).preview.files;
+  assert.ok(!before.some((f) => f.path === "libs/my.pretty/C.kicad_mod"));
 
+  await write(root, ".heypcbignore", "");
+  await write(root, "libs/my.pretty/R.kicad_mod", "(footprint Updated)\n");
+  const uploaded = await uploadKicadProject(ctx, { path: root });
+  assert.equal(uploaded.isError, undefined);
+  assert.deepEqual((uploaded.structuredContent as { uploaded: { files: string[] } }).uploaded.files, EXPECTED);
   const req = fake.requests.find((r) => r.path === "/v1/projects/import")!;
-  assert.equal(req.headers.authorization, `Bearer ${TEST_KEY}`);
-  assert.match(String(req.headers["idempotency-key"]), /^[0-9a-f-]{36}$/);
   const form = await new Response(new Uint8Array(req.body), { headers: { "content-type": String(req.headers["content-type"]) } }).formData();
-  assert.equal(form.get("name"), "board");
-  const file = form.get("file") as Blob & { name?: string };
-  assert.equal(file.name, "board.zip");
-  assert.equal(file.type, "application/zip");
-  assert.deepEqual([...readZip(Buffer.from(await file.arrayBuffer())).keys()], [...EXPECTED].sort());
+  const files = readZip(Buffer.from(await (form.get("file") as Blob).arrayBuffer()));
+  assert.equal(files.get("libs/my.pretty/R.kicad_mod")!.toString(), "(footprint Updated)\n");
+  assert.ok(files.has("libs/my.pretty/C.kicad_mod"));
 });
 
 test("a 503 that wrote nothing is sent again with the SAME key; a timeout is never re-sent; a refusal is passed through", async () => {

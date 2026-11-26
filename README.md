@@ -213,7 +213,7 @@ logic of its own. It adds the tools that need your files:
 | Tool | What it does |
 |---|---|
 | `open_kicad_project` | Binds a KiCad project folder on this computer to one HeyPCB project, so every HeyPCB tool works on it and its edits land back in the folder ([see below](#working-on-a-kicad-project-in-its-own-folder)). |
-| `upload_kicad_project` | Zips a KiCad project folder on this computer (board, schematic hierarchy, `.kicad_pro`, `.kicad_dru`, library tables and project-local libraries, but not 3D models, backups or `.kicad_prl`; at most 50 MB) and imports it as a new, separate HeyPCB project: a one-off copy. Returns the project id and its web link. |
+| `upload_kicad_project` | Zips a KiCad project folder on this computer (board, schematic hierarchy, `.kicad_pro`, `.kicad_dru`, library tables and project-local libraries, but not 3D models, backups or `.kicad_prl`; at most 50 MB) and imports it as a new, separate HeyPCB project: a one-off copy. Returns the project id and its web link. Pass `dry_run: true` to preview the files without signing in or uploading. |
 | `save_export` | Saves Gerbers, the KiCad project, BOM, pick-and-place (CPL) or STEP into a folder here, atomically, and returns the file's path. |
 | `install_parts` (not advertised) | Refuses before writing until the server exposes a supported parts-assets API. |
 | `check_local` | KiCad's own DRC or ERC on the project here, with `kicad-cli`: free, no network. A fast pre-check; `check_board` stays the full verification. |
@@ -223,6 +223,28 @@ logic of its own. It adds the tools that need your files:
 It needs Node.js 18 or newer and nothing else. Everything it uses is bundled
 into one file. `check_local` and `export_local` also need KiCad 8 or newer
 installed (`kicad-cli` on `PATH`, or in KiCad's standard install folder).
+
+### Preview an upload
+
+Ask your agent to call `upload_kicad_project` with:
+
+```json
+{
+  "path": "~/boards/sensor",
+  "dry_run": true
+}
+```
+
+The result has `dry_run: true` and `preview: { root, files, fileCount, bytes }`:
+`files` lists project-relative paths and their byte sizes, and `bytes` is the
+total uncompressed size. `skipped` lists excluded files with their reasons;
+`missing` lists missing references and does not block the preview.
+
+The preview uses the same project collector, `.heypcbignore`, exclusions and
+collection checks as an upload. It needs no sign-in, makes no network requests
+or file writes, and creates no online project or workspace binding. It describes
+the files as they are now: a later upload collects them again. Omit `dry_run`
+or set it to `false` to upload normally.
 
 ### 1. Sign in (once per computer)
 
@@ -244,8 +266,8 @@ server as `HEYPCB_API_KEY` (examples below). A key is used instead of a
 stored sign-in while it is set.
 
 > [!TIP]
-> Without either, the server still starts, and every tool answers with these
-> two ways to sign in.
+> Without either, the server still starts. Upload previews and the offline
+> local tools work; tools that need sign-in explain these two ways to sign in.
 
 ### 2. Add it to your agent
 

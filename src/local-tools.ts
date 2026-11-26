@@ -67,12 +67,15 @@ const ALL_LOCAL_TOOLS: Tool[] = [
       "`path` is the project's folder (the one holding its .kicad_pro / .kicad_pcb) or the .kicad_pro / .kicad_pcb / .kicad_sch file itself; ~ is your home folder. " +
       "It sends the board, the root schematic and every sub-sheet it names, the .kicad_pro, .kicad_dru, sym-lib-table / fp-lib-table and the project-local libraries they name — " +
       "never 3D models, backups, .kicad_prl or what .heypcbignore names — at most 50 MB. Free. " +
-      "Returns the new project's id (use it as `project` in the other tools), its web link, and the files sent. Each call makes a new project.",
+      "Returns the new project's id (use it as `project` in the other tools), its web link, and the files sent. Each upload makes a new project. " +
+      "With dry_run: true, only preview the selected files and their byte sizes, file count and total uncompressed bytes, skipped files and missing references. " +
+      "No sign-in, network requests or file writes; no project is created. Missing references remain informational. A later upload collects the files again.",
     inputSchema: {
       type: "object",
       properties: {
         path: PATH_PROP,
         name: { type: "string", description: "The project's name on HeyPCB. Default: the KiCad project's file name." },
+        dry_run: { type: "boolean", default: false, description: "Preview the upload locally without signing in, sending files or creating a project. Default false." },
       },
       required: ["path"],
       additionalProperties: false,
@@ -258,6 +261,20 @@ async function guarded(fn: () => Promise<CallToolResult>): Promise<CallToolResul
 
 export function uploadKicadProject(ctx: LocalContext, args: Record<string, unknown>, signal?: AbortSignal): Promise<CallToolResult> {
   return guarded(async () => {
+    if (args.dry_run !== undefined && typeof args.dry_run !== "boolean") {
+      return refusalResult(refusal("bad_dry_run", "`dry_run` must be a boolean.", "Pass dry_run: true to preview, or false (or omit it) to upload."));
+    }
+    if (args.dry_run === true) {
+      const { root, stem } = await locateProject(String(args.path ?? ""), ctx.home);
+      const col = await collectProject(root, stem);
+      return okResult({
+        dry_run: true,
+        preview: { root: col.root, files: col.files.map((f) => ({ path: f.path, bytes: f.bytes })), fileCount: col.files.length, bytes: col.totalBytes },
+        skipped: col.skipped,
+        missing: col.missing,
+        note: "Preview only: nothing was uploaded and no project was created. A later upload collects the files again.",
+      });
+    }
     await ctx.auth.bearer(); // signed in? (before any work)
     const { root, stem } = await locateProject(String(args.path ?? ""), ctx.home);
     const imp = await importProject(ctx, root, stem, args.name, signal);
