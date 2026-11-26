@@ -371,7 +371,13 @@ export function projectId(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   let s = raw.trim();
   const m = /\/p\/([^/?#]+)/.exec(s);
-  if (m && /^https?:\/\//.test(s)) s = decodeURIComponent(m[1]);
+  if (m && /^https?:\/\//.test(s)) {
+    try {
+      s = decodeURIComponent(m[1]);
+    } catch {
+      return null;
+    }
+  }
   return /^[A-Za-z0-9._-]{1,128}$/.test(s) ? s : null;
 }
 
