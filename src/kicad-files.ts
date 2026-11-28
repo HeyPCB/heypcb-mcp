@@ -1,5 +1,5 @@
 /**
- * Which files of a local KiCad project `upload_kicad_project` sends — the
+ * Which files of a local KiCad project `upload_project` sends — the
  * same set HeyPCB's KiCad plugin uploads and the server tracks for a
  * project, so a project an agent uploads holds what one synced from KiCad
  * holds (test/upload.test.ts walks the cases):
@@ -22,6 +22,9 @@
  * folder (`unsafe_path`), more than 50 MB in total (`project_too_large`, the
  * server's own import cap). Unlike the plugin, a project with no board yet
  * (only a schematic) is uploaded too: the import takes one.
+ *
+ * A board from another tool (Altium, Eagle, EasyEDA) is board-files.ts, on
+ * the same walker and the same refusals.
  */
 import { promises as fsp } from "node:fs";
 import path from "node:path";
@@ -36,8 +39,8 @@ const MODEL_EXTENSIONS = [".step", ".stp", ".wrl", ".wrz", ".iges", ".igs", ".gl
 const BACKUP_DIR = /(-backups|^\.history|^#auto_saved_files#|^\.heypcb)$/i;
 const BACKUP_FILE = /(^_autosave-|\.bak$|-bak$|\.lck$|^~|\.kicad_prl$|^fp-info-cache$|^#auto_saved_files#)/i;
 
-const SYMLINK_FIX = "Replace the link with the file itself (copy it into the project folder), then call upload_kicad_project again.";
-const TOO_LARGE_FIX = "Remove large files the project does not need from its folder (old exports, images), then call upload_kicad_project again.";
+const SYMLINK_FIX = "Replace the link with the file itself (copy it into the project folder), then call the tool again.";
+const TOO_LARGE_FIX = "Remove large files the project does not need from its folder (old exports, images), then call the tool again.";
 
 export type ProjectFile = { path: string; abspath: string; bytes: number; sha256: string; kind: string; data: Buffer };
 export type Collection = {
@@ -98,7 +101,7 @@ export function ignoreMatcher(text: string): (rel: string) => boolean {
   return (rel) => res.some((r) => r.test(rel));
 }
 
-function tilde(p: string): string {
+export function tilde(p: string): string {
   const home = os.homedir();
   return p.startsWith(home) ? "~" + p.slice(home.length) : p;
 }
@@ -112,7 +115,8 @@ async function lexists(p: string): Promise<boolean> {
   }
 }
 
-class Walker {
+/** Adds a project's files one by one, refusing any that leads outside its folder. */
+export class Walker {
   readonly root: string;
   realRoot = "";
   files = new Map<string, ProjectFile>();
@@ -178,7 +182,7 @@ class Walker {
       data = await fsp.readFile(p);
     } catch (err) {
       throw new RefusalError(
-        refusal("project_file_unreadable", `HeyPCB could not read ${rel} (${(err as NodeJS.ErrnoException).code ?? (err as Error).message}).`, "Check that the file is readable and not locked by another program, then call upload_kicad_project again.", { path: rel })
+        refusal("project_file_unreadable", `HeyPCB could not read ${rel} (${(err as NodeJS.ErrnoException).code ?? (err as Error).message}).`, "Check that the file is readable and not locked by another program, then call the tool again.", { path: rel })
       );
     }
     this.files.set(rel, { path: rel, abspath: path.resolve(p), bytes: data.length, sha256: createHash("sha256").update(data).digest("hex"), kind, data });
@@ -186,7 +190,7 @@ class Walker {
   }
 }
 
-function tooLarge(total: number, largest: Array<{ path: string; bytes: number }>): RefusalError {
+export function tooLarge(total: number, largest: Array<{ path: string; bytes: number }>): RefusalError {
   return new RefusalError(
     refusal("project_too_large", `This project's files add up to ${(total / 1e6).toFixed(1)} MB; HeyPCB takes at most ${MAX_PROJECT_BYTES / (1024 * 1024)} MB.`, TOO_LARGE_FIX, {
       totalBytes: total,
@@ -272,7 +276,7 @@ export async function collectProject(root: string, stem: string): Promise<Collec
   const files = [...w.files.values()].sort((a, b) => (a.kind === "board" ? 0 : 1) - (b.kind === "board" ? 0 : 1) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   if (!files.some((f) => f.kind === "board" || f.kind === "schematic")) {
     throw new RefusalError(
-      refusal("no_board", `${tilde(path.join(w.root, stem))} has no .kicad_pcb and no .kicad_sch to upload.`, "Save the board or schematic in KiCad first, then call upload_kicad_project again with the project folder.")
+      refusal("no_board", `${tilde(path.join(w.root, stem))} has no .kicad_pcb and no .kicad_sch to upload.`, "Save the board or schematic in KiCad first, then call the tool again with the project folder.")
     );
   }
   // Only a missing sheet or library is news: the .kicad_pro, .kicad_dru and lib tables are optional.
@@ -290,37 +294,36 @@ export async function collectProject(root: string, stem: string): Promise<Collec
 const PROJECT_EXTS = [".kicad_pro", ".kicad_pcb", ".kicad_sch"];
 const SKIP_DIRS = /^(node_modules|\..*|.*-backups|#auto_saved_files#)$/i;
 
-async function listByExt(dir: string, ext: string): Promise<string[]> {
-  try {
-    const names = await fsp.readdir(dir, { withFileTypes: true });
-    return names.filter((d) => (d.isFile() || d.isSymbolicLink()) && d.name.toLowerCase().endsWith(ext) && !excluded(d.name)).map((d) => path.join(dir, d.name)).sort();
-  } catch {
-    return [];
-  }
-}
+/** A test of a file's lower-cased name. */
+export type NameTest = (lower: string) => boolean;
+const byExt = (ext: string): NameTest => (lower) => lower.endsWith(ext);
 
-/** `.kicad_pro` files at most `depth` folders below `dir` (hidden folders, backups and node_modules skipped). */
-async function findDeep(dir: string, ext: string, depth: number, budget = { left: 5000 }): Promise<string[]> {
-  const out = await listByExt(dir, ext);
-  if (depth <= 0) return out;
+/**
+ * The files `match` accepts at most `depth` folders below `dir`, `dir`'s own
+ * first (hidden folders, backups, node_modules and the folders `skip` names
+ * are not entered).
+ */
+export async function findFiles(dir: string, match: NameTest, depth: number, skip?: RegExp, budget = { left: 5000 }): Promise<string[]> {
   let entries: import("node:fs").Dirent[] = [];
   try {
     entries = await fsp.readdir(dir, { withFileTypes: true });
   } catch {
-    return out;
+    return [];
   }
+  const out = entries.filter((d) => (d.isFile() || d.isSymbolicLink()) && match(d.name.toLowerCase()) && !excluded(d.name)).map((d) => path.join(dir, d.name)).sort();
+  if (depth <= 0) return out;
   for (const d of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
     if (--budget.left < 0) break;
-    if (!d.isDirectory() || SKIP_DIRS.test(d.name)) continue;
-    out.push(...(await findDeep(path.join(dir, d.name), ext, depth - 1, budget)));
+    if (!d.isDirectory() || SKIP_DIRS.test(d.name) || skip?.test(d.name)) continue;
+    out.push(...(await findFiles(path.join(dir, d.name), match, depth - 1, skip, budget)));
   }
   return out;
 }
 
-function several(found: string[], base: string, what: string): RefusalError {
+export function several(found: string[], base: string, what: string, fix = "Call the tool again with `path` set to the .kicad_pro (or .kicad_pcb) file of the project you mean."): RefusalError {
   const list = found.slice(0, 10).map((f) => path.relative(base, f) || path.basename(f));
   return new RefusalError(
-    refusal("several_projects", `${tilde(base)} holds ${found.length} ${what} files, so HeyPCB cannot tell which project you mean.`, "Call upload_kicad_project again with `path` set to the .kicad_pro (or .kicad_pcb) file of the project you mean.", {
+    refusal("several_projects", `${tilde(base)} holds ${found.length} ${what} files, so HeyPCB cannot tell which project you mean.`, fix, {
       candidates: list,
     })
   );
@@ -336,7 +339,7 @@ export async function locateProject(input: string, home: string = os.homedir()):
   try {
     st = await fsp.stat(abs);
   } catch {
-    throw new RefusalError(refusal("not_found", `${tilde(abs)} does not exist on this computer.`, "Check the path (an absolute path is safest), then call upload_kicad_project again."));
+    throw new RefusalError(refusal("not_found", `${tilde(abs)} does not exist on this computer.`, "Check the path (an absolute path is safest), then call the tool again."));
   }
   if (st.isFile()) {
     const lower = abs.toLowerCase();
@@ -349,16 +352,16 @@ export async function locateProject(input: string, home: string = os.homedir()):
   if (!st.isDirectory()) throw new RefusalError(refusal("not_kicad", `${tilde(abs)} is neither a folder nor a KiCad file.`, "Pass the KiCad project's folder, or its .kicad_pro file."));
   const stemOf = (f: string, ext: string) => ({ root: path.dirname(f), stem: path.basename(f).slice(0, -ext.length) });
   for (const ext of [".kicad_pro", ".kicad_pcb"]) {
-    const top = await listByExt(abs, ext);
+    const top = await findFiles(abs, byExt(ext), 0);
     if (top.length === 1) return stemOf(top[0], ext);
     if (top.length > 1) throw several(top, abs, ext);
   }
   for (const ext of [".kicad_pro", ".kicad_pcb"]) {
-    const deep = await findDeep(abs, ext, 3);
+    const deep = await findFiles(abs, byExt(ext), 3);
     if (deep.length === 1) return stemOf(deep[0], ext);
     if (deep.length > 1) throw several(deep, abs, ext);
   }
-  const sch = await listByExt(abs, ".kicad_sch");
+  const sch = await findFiles(abs, byExt(".kicad_sch"), 0);
   if (sch.length === 1) return stemOf(sch[0], ".kicad_sch");
   throw new RefusalError(
     refusal("no_project", `HeyPCB found no KiCad project (.kicad_pro or .kicad_pcb) in ${tilde(abs)}.`, "Pass the folder that holds the project's .kicad_pro, or the .kicad_pro / .kicad_pcb file itself.")

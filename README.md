@@ -80,7 +80,7 @@ codex mcp add heypcb -- npx -y @heypcb/mcp && npx -y @heypcb/mcp login
 | Install | nothing | Node.js 18+ |
 | All HeyPCB tools | ✅ | ✅ |
 | Work on a KiCad project in its own folder, edits synced back | ❌ | ✅ `open_kicad_project` |
-| Upload a copy of a KiCad project from your disk | ❌ | ✅ `upload_kicad_project` |
+| Upload a copy of a KiCad project, or an Altium, Eagle or EasyEDA board, from your disk | ❌ | ✅ `upload_project` |
 | Save Gerbers, BOM, CPL, STEP to a folder | ❌ | ✅ `save_export` |
 | HeyPCB parts in the project's own libraries | ❌ | Awaiting the parts-assets API |
 | KiCad's own DRC/ERC and exports, free and offline | ❌ | ✅ `check_local`, `export_local` |
@@ -213,7 +213,8 @@ logic of its own. It adds the tools that need your files:
 | Tool | What it does |
 |---|---|
 | `open_kicad_project` | Binds a KiCad project folder on this computer to one HeyPCB project, so every HeyPCB tool works on it and its edits land back in the folder ([see below](#working-on-a-kicad-project-in-its-own-folder)). |
-| `upload_kicad_project` | Zips a KiCad project folder on this computer (board, schematic hierarchy, `.kicad_pro`, `.kicad_dru`, library tables and project-local libraries, but not 3D models, backups or `.kicad_prl`; at most 50 MB) and imports it as a new, separate HeyPCB project: a one-off copy. Returns the project id and its web link. |
+| `upload_project` | Imports a project from this computer as a new, separate HeyPCB project: a one-off copy. A KiCad project folder is zipped (board, schematic hierarchy, `.kicad_pro`, `.kicad_dru`, library tables and project-local libraries, but not 3D models, backups or `.kicad_prl`). A board from Altium (`.PcbDoc`), Eagle (`.brd`) or EasyEDA (`.json`, `.epro`) is sent as it is, and HeyPCB converts it into a KiCad project ([see below](#uploading-a-board-from-altium-eagle-or-easyeda)). At most 50 MB. Returns the project id and its web link. |
+| `upload_kicad_project` | The former name of `upload_project`, kept so existing setups and allow-lists keep working: the same tool. |
 | `save_export` | Saves Gerbers, the KiCad project, BOM, pick-and-place (CPL) or STEP into a folder here, atomically, and returns the file's path. |
 | `install_parts` (not advertised) | Refuses before writing until the server exposes a supported parts-assets API. |
 | `check_local` | KiCad's own DRC or ERC on the project here, with `kicad-cli`: free, no network. A fast pre-check; `check_board` stays the full verification. |
@@ -306,6 +307,7 @@ In `claude_desktop_config.json` (Settings → Developer → Edit Config):
 Ask your agent, for example:
 
 - "Upload my KiCad project at `~/boards/sensor` to HeyPCB and run the full check."
+- "Upload my Altium board `~/altium/lamp/lamp.PcbDoc` to HeyPCB and show me its tracks."
 - "Save the Gerbers and BOM for that project into `~/boards/sensor/fab`."
 - "Open my KiCad project at `~/boards/sensor`, add a 3.3 V LDO and route the board."
 
@@ -331,6 +333,28 @@ keeps the folder in sync:
 The project stays a normal KiCad project: open it in KiCad at any time.
 List files you never want uploaded in a `.heypcbignore` next to the
 `.kicad_pro` (one gitignore-style pattern a line).
+
+### Uploading a board from Altium, Eagle or EasyEDA
+
+Ask your agent to upload it (`upload_project` with the file or its folder).
+HeyPCB's server converts the board into a KiCad project on import: nothing
+is converted on your computer, and the result is a new HeyPCB project (bring
+the converted KiCad project back with `save_export`, kind `kicad`). What
+goes up:
+
+| `path` | Sent |
+|---|---|
+| an Altium board, `.PcbDoc` | that file, as it is |
+| an Altium project folder, or its `.PrjPcb` | the `.PrjPcb` and the `.PcbDoc` and `.SchDoc` files it lists, zipped. HeyPCB converts the board; it does not read Altium schematics. |
+| an Eagle (or KiCad 3) board, `.brd` | that file, as it is |
+| an EasyEDA PCB file `.json`, or an EasyEDA Pro project `.epro` (or `.epro2`) | that file, as it is |
+
+In a folder, a KiCad project is still found first. Otherwise the folder
+(then up to three levels below it, past Altium's History, `__Previews`,
+Project Logs and Project Outputs folders) must hold one `.PrjPcb`, or one
+board file; EasyEDA's PCB file counts there under the name EasyEDA exports
+it as, `PCB_<name>.json`. A schematic alone (`.SchDoc`) is refused: HeyPCB
+converts Altium boards only.
 
 ### Commands
 
@@ -358,10 +382,11 @@ npx @heypcb/mcp status      who this computer is signed in as
 
 ### What it does with your computer
 
-- **Reads** a project's files when you call `upload_kicad_project`,
+- **Reads** a project's files when you call `upload_project`,
   `open_kicad_project`, `check_local` or `export_local`, and before each
   HeyPCB call on a bound project: only the project's own files listed
-  above, minus what `.heypcbignore` names. **A bound project's files are
+  above (for a board from another tool, the board file, or the Altium
+  project's files), minus what `.heypcbignore` names. **A bound project's files are
   uploaded to HeyPCB**, again whenever you change them. A file or link that
   leads outside the project folder stops the upload; nothing partial is sent.
 - **Writes**, in a bound project folder, the files HeyPCB changed (after

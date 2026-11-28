@@ -1,0 +1,26 @@
+[Design]
+Version=1.0
+HierarchyMode=0
+OutputPath=Project Outputs for lamp
+
+[Document1]
+DocumentPath=lamp.SchDoc
+AnnotationEnabled=1
+
+[Document2]
+DocumentPath=sheets\power.SchDoc
+
+[Document3]
+DocumentPath=lamp.PcbDoc
+
+[Document4]
+DocumentPath=libs\lamp.PcbLib
+
+[Document5]
+DocumentPath=lamp.OutJob
+
+[Document6]
+DocumentPath=missing.SchDoc
+
+[GeneratedDocument1]
+DocumentPath=Project Outputs for lamp\lamp.GTL

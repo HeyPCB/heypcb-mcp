@@ -1,7 +1,8 @@
 /**
- * upload_kicad_project: which files go into the zip (the KiCad plugin's own
- * list), the refusals (outside the folder, over 50 MB, several projects), and
- * the import call (multipart, Idempotency-Key, the same key on a retry).
+ * upload_project with a KiCad project: which files go into the zip (the KiCad
+ * plugin's own list), the refusals (outside the folder, over 50 MB, several
+ * projects), and the import call (multipart, Idempotency-Key, the same key on
+ * a retry). Boards from other tools: upload-boards.test.ts.
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -11,7 +12,7 @@ import path from "node:path";
 import { Auth } from "../src/auth.ts";
 import { CredentialStore } from "../src/credentials.ts";
 import { collectProject, locateProject } from "../src/kicad-files.ts";
-import { uploadKicadProject } from "../src/local-tools.ts";
+import { uploadProject } from "../src/local-tools.ts";
 import { RefusalError } from "../src/refusal.ts";
 import { buildZip } from "../src/zip.ts";
 import { startFakeHeypcb } from "./fake-heypcb.ts";
@@ -151,11 +152,12 @@ test("uploads the zip as multipart `file` with an Idempotency-Key, and returns t
   const fake = await startFakeHeypcb({ acceptTokens: new Set([TEST_KEY]) });
   closers.push(fake.close);
   const root = await makeProject();
-  const res = await uploadKicadProject(ctxFor(fake.mcpUrl), { path: root });
+  const res = await uploadProject(ctxFor(fake.mcpUrl), { path: root });
   assert.equal(res.isError, undefined, JSON.stringify(res.structuredContent));
-  const out = res.structuredContent as { project: { id: string }; webUrl: string; uploaded: { files: string[] } };
+  const out = res.structuredContent as { project: { id: string }; webUrl: string; format: string; uploaded: { files: string[] } };
   assert.equal(out.project.id, "prj_123");
   assert.equal(out.webUrl, `${fake.url}/p/prj_123`);
+  assert.equal(out.format, "kicad");
   assert.deepEqual(out.uploaded.files, EXPECTED);
 
   const req = fake.requests.find((r) => r.path === "/v1/projects/import")!;
@@ -179,7 +181,7 @@ test("a 503 that wrote nothing is sent again with the SAME key; a timeout is nev
   });
   closers.push(fake.close);
   const root = await makeProject();
-  const res = await uploadKicadProject(ctxFor(fake.mcpUrl), { path: root, name: "LED blinker" });
+  const res = await uploadProject(ctxFor(fake.mcpUrl), { path: root, name: "LED blinker" });
   assert.equal((res.structuredContent as { project: { id: string } }).project.id, "prj_retry");
   const keys = fake.requests.filter((r) => r.path === "/v1/projects/import").map((r) => r.headers["idempotency-key"]);
   assert.equal(keys.length, 2);
@@ -190,7 +192,7 @@ test("a 503 that wrote nothing is sent again with the SAME key; a timeout is nev
     importAnswers: [{ status: 504, body: { ok: false, code: "import_timeout", error: "The design engine may still be importing this file.", fix: "Check your boards in a moment.", retryable: true } }],
   });
   closers.push(timedOut.close);
-  const late = await uploadKicadProject(ctxFor(timedOut.mcpUrl), { path: root });
+  const late = await uploadProject(ctxFor(timedOut.mcpUrl), { path: root });
   assert.equal((late.structuredContent as { code: string }).code, "import_timeout");
   assert.equal(timedOut.requests.filter((r) => r.path === "/v1/projects/import").length, 1, "a timeout may have imported it: never sent twice");
 
@@ -199,7 +201,7 @@ test("a 503 that wrote nothing is sent again with the SAME key; a timeout is nev
     importAnswers: [{ status: 402, body: { ok: false, code: "project_limit", error: "Your plan's boards are used up.", fix: "Upgrade in Settings → Plan & billing.", retryable: false } }],
   });
   closers.push(refusing.close);
-  const refused = await uploadKicadProject(ctxFor(refusing.mcpUrl), { path: root });
+  const refused = await uploadProject(ctxFor(refusing.mcpUrl), { path: root });
   assert.equal(refused.isError, true);
   assert.equal((refused.structuredContent as { code: string }).code, "project_limit");
   assert.equal((refused.structuredContent as { fix: string }).fix, "Upgrade in Settings → Plan & billing.");

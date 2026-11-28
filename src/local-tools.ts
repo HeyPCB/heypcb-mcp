@@ -4,7 +4,9 @@
  *
  * - `open_kicad_project`  bind a KiCad project folder to one HeyPCB project
  *   and keep the two in step (workspace.ts); the usual way in.
- * - `upload_kicad_project` a one-off copy of a project on HeyPCB.
+ * - `upload_project`       a one-off copy on HeyPCB of a KiCad project, or of
+ *   an Altium, Eagle or EasyEDA board (board-files.ts), which HeyPCB converts.
+ *   `upload_kicad_project`, its old name, is the same tool.
  * - `save_export`          a HeyPCB export saved to a folder here.
  * - `install_parts`        HeyPCB parts into the project's own libraries (library.ts).
  * - `check_local`, `export_local`  KiCad's own kicad-cli, free, no network (kicad-cli.ts).
@@ -21,6 +23,7 @@ import type { Auth } from "./auth.ts";
 import { projectUrl, type Config } from "./config.ts";
 import { anySignal, chunksOf, networkRefusal, neverSent, responseRefusal, sleep } from "./http.ts";
 import { runCheck, runExport, LOCAL_EXPORT_KINDS, type LocalExportKind } from "./kicad-cli.ts";
+import { collectBoard, locateUpload, type BoardFormat } from "./board-files.ts";
 import { collectProject, locateProject, MAX_PROJECT_BYTES, type Collection } from "./kicad-files.ts";
 import { okResult, refusal, RefusalError, refusalResult } from "./refusal.ts";
 import { freeName, resolveTargetDir, safeFileName, writeAtomic } from "./safe-path.ts";
@@ -32,6 +35,20 @@ type ExportKind = (typeof EXPORT_KINDS)[number];
 const EXPORT_EXT: Record<ExportKind, string> = { gerbers: ".zip", kicad: ".zip", bom: ".csv", cpl: ".csv", step: ".step" };
 
 const PATH_PROP = { type: "string", description: "The KiCad project's folder, or its .kicad_pro / .kicad_pcb / .kicad_sch file. Absolute, or starting with ~/." } as const;
+
+const UPLOAD_SCHEMA: Tool["inputSchema"] = {
+  type: "object",
+  properties: {
+    path: {
+      type: "string",
+      description: "The project's folder, or one file of it: a KiCad .kicad_pro / .kicad_pcb / .kicad_sch, an Altium .PrjPcb or .PcbDoc, an Eagle (or KiCad 3) .brd, or an EasyEDA .json / .epro. Absolute, or starting with ~/.",
+    },
+    name: { type: "string", description: "The project's name on HeyPCB. Default: the project's or board's file name." },
+  },
+  required: ["path"],
+  additionalProperties: false,
+};
+const UPLOAD_ANNOTATIONS = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
 
 const ALL_LOCAL_TOOLS: Tool[] = [
   {
@@ -60,24 +77,25 @@ const ALL_LOCAL_TOOLS: Tool[] = [
     annotations: { title: "Open a KiCad project", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
   {
-    name: "upload_kicad_project",
-    title: "Upload a KiCad project",
+    name: "upload_project",
+    title: "Upload a board or project",
     description:
-      "Upload a KiCad project from this computer to HeyPCB as a NEW, separate HeyPCB project (a copy: nothing syncs back). To work on a project in its folder, use open_kicad_project instead. " +
-      "`path` is the project's folder (the one holding its .kicad_pro / .kicad_pcb) or the .kicad_pro / .kicad_pcb / .kicad_sch file itself; ~ is your home folder. " +
-      "It sends the board, the root schematic and every sub-sheet it names, the .kicad_pro, .kicad_dru, sym-lib-table / fp-lib-table and the project-local libraries they name — " +
-      "never 3D models, backups, .kicad_prl or what .heypcbignore names — at most 50 MB. Free. " +
-      "Returns the new project's id (use it as `project` in the other tools), its web link, and the files sent. Each call makes a new project.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: PATH_PROP,
-        name: { type: "string", description: "The project's name on HeyPCB. Default: the KiCad project's file name." },
-      },
-      required: ["path"],
-      additionalProperties: false,
-    },
-    annotations: { title: "Upload a KiCad project", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      "Upload a board or project from this computer to HeyPCB as a NEW, separate HeyPCB project (a copy: nothing syncs back). To work on a KiCad project in its folder, use open_kicad_project instead. " +
+      "`path` is the project's folder or one of its files; ~ is your home folder. " +
+      "A KiCad project goes up zipped: the board, the root schematic and every sub-sheet it names, the .kicad_pro, .kicad_dru, sym-lib-table / fp-lib-table and the project-local libraries they name — " +
+      "never 3D models, backups, .kicad_prl or what .heypcbignore names. " +
+      "A board from another tool goes up as it is and HeyPCB converts it into a KiCad project on import: an Altium .PcbDoc, an Eagle (or KiCad 3) .brd, an EasyEDA .json or .epro. " +
+      "An Altium project's folder or .PrjPcb sends the .PrjPcb with the .PcbDoc and .SchDoc files it lists; HeyPCB converts the board, not the Altium schematics. At most 50 MB. Free. " +
+      "Returns the new project's id (use it as `project` in the other tools), its web link, the format and the files sent. Each call makes a new project.",
+    inputSchema: UPLOAD_SCHEMA,
+    annotations: { title: "Upload a board or project", ...UPLOAD_ANNOTATIONS },
+  },
+  {
+    name: "upload_kicad_project",
+    title: "Upload a board or project (old name)",
+    description: "The former name of upload_project: the same tool, arguments and result, for KiCad, Altium, Eagle and EasyEDA files alike. Call upload_project instead.",
+    inputSchema: UPLOAD_SCHEMA,
+    annotations: { title: "Upload a board or project (old name)", ...UPLOAD_ANNOTATIONS },
   },
   {
     name: "save_export",
@@ -181,11 +199,11 @@ function registry(ctx: LocalContext): Workspaces {
   return ctx.workspaces;
 }
 
-type Imported = { id: string; name: string; revision: string | null; col: Collection; zipBytes: number };
+type Created = { id: string; name: string; revision: string | null };
+type Imported = Created & { col: Collection; zipBytes: number };
 
-/** Upload a project as a new HeyPCB project. Throws RefusalError. */
-async function importProject(ctx: LocalContext, root: string, stem: string, nameArg: unknown, signal?: AbortSignal): Promise<Imported> {
-  const col = await collectProject(root, stem);
+/** A collection's files as one zip, refused over the import's cap. */
+function zipped(col: Collection): Buffer {
   const zip = buildZip(col.files.map((f) => ({ path: f.path, data: f.data })));
   if (zip.length > MAX_PROJECT_BYTES) {
     throw new RefusalError(
@@ -194,7 +212,21 @@ async function importProject(ctx: LocalContext, root: string, stem: string, name
       })
     );
   }
-  const name = typeof nameArg === "string" && nameArg.trim() ? nameArg.trim().slice(0, 120) : stem;
+  return zip;
+}
+
+const projectName = (nameArg: unknown, stem: string) => (typeof nameArg === "string" && nameArg.trim() ? nameArg.trim().slice(0, 120) : stem);
+
+/** Upload a KiCad project as a new HeyPCB project. Throws RefusalError. */
+async function importProject(ctx: LocalContext, root: string, stem: string, nameArg: unknown, signal?: AbortSignal): Promise<Imported> {
+  const col = await collectProject(root, stem);
+  const zip = zipped(col);
+  const created = await postImport(ctx, { name: `${stem}.zip`, type: "application/zip", data: zip }, projectName(nameArg, stem), signal);
+  return { ...created, col, zipBytes: zip.length };
+}
+
+/** POST one file to the import, which makes it a new HeyPCB project. Throws RefusalError. */
+async function postImport(ctx: LocalContext, file: { name: string; type: string; data: Buffer }, name: string, signal?: AbortSignal): Promise<Created> {
   // One key for every attempt of THIS upload. Sent again only when the
   // first try certainly changed nothing — a connection that never opened,
   // or a 502/503 saying `written: false`. A timeout (504, 524, or no
@@ -205,7 +237,7 @@ async function importProject(ctx: LocalContext, root: string, stem: string, name
   let res: Response | null = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     const form = new FormData();
-    form.append("file", new Blob([new Uint8Array(zip)], { type: "application/zip" }), `${stem}.zip`);
+    form.append("file", new Blob([new Uint8Array(file.data)], { type: file.type }), file.name);
     form.append("name", name);
     try {
       res = await ctx.auth.fetch(`${ctx.config.apiBase}/v1/projects/import`, {
@@ -241,8 +273,6 @@ async function importProject(ctx: LocalContext, root: string, stem: string, name
     id,
     name: typeof body?.project?.name === "string" ? body.project.name : name,
     revision: typeof body?.project?.revision === "string" ? body.project.revision : null,
-    col,
-    zipBytes: zip.length,
   };
 }
 
@@ -256,17 +286,39 @@ async function guarded(fn: () => Promise<CallToolResult>): Promise<CallToolResul
   }
 }
 
-export function uploadKicadProject(ctx: LocalContext, args: Record<string, unknown>, signal?: AbortSignal): Promise<CallToolResult> {
+const CONVERTED: Record<BoardFormat, string> = {
+  altium: "HeyPCB converted the Altium board into a KiCad project on its server; it does not read Altium schematics (.SchDoc). save_export with kind kicad brings the converted project here.",
+  eagle: "HeyPCB converted the .brd board into a KiCad project on its server. save_export with kind kicad brings the converted project here.",
+  easyeda: "HeyPCB converted the EasyEDA board into a KiCad project on its server. save_export with kind kicad brings the converted project here.",
+};
+
+export function uploadProject(ctx: LocalContext, args: Record<string, unknown>, signal?: AbortSignal): Promise<CallToolResult> {
   return guarded(async () => {
     await ctx.auth.bearer(); // signed in? (before any work)
-    const { root, stem } = await locateProject(String(args.path ?? ""), ctx.home);
-    const imp = await importProject(ctx, root, stem, args.name, signal);
+    const target = await locateUpload(String(args.path ?? ""), ctx.home);
+    if (target.format === "kicad") {
+      const imp = await importProject(ctx, target.root, target.stem, args.name, signal);
+      return okResult({
+        project: { id: imp.id, name: imp.name, revision: imp.revision },
+        webUrl: projectUrl(ctx.config, imp.id),
+        format: "kicad",
+        uploaded: { root: target.root, files: imp.col.files.map((f) => f.path), bytes: imp.col.totalBytes, zipBytes: imp.zipBytes },
+        skipped: imp.col.skipped,
+        missing: imp.col.missing,
+      });
+    }
+    const col = await collectBoard(target);
+    // One board file goes as it is, under its own name: the import reads the name to know the format.
+    const file = col.zip ? { name: `${col.stem}.zip`, type: "application/zip", data: zipped(col) } : { name: col.files[0].path, type: "application/octet-stream", data: col.files[0].data };
+    const created = await postImport(ctx, file, projectName(args.name, col.stem), signal);
     return okResult({
-      project: { id: imp.id, name: imp.name, revision: imp.revision },
-      webUrl: projectUrl(ctx.config, imp.id),
-      uploaded: { root, files: imp.col.files.map((f) => f.path), bytes: imp.col.totalBytes, zipBytes: imp.zipBytes },
-      skipped: imp.col.skipped,
-      missing: imp.col.missing,
+      project: created,
+      webUrl: projectUrl(ctx.config, created.id),
+      format: target.format,
+      uploaded: { root: col.root, files: col.files.map((f) => f.path), bytes: col.totalBytes, ...(col.zip ? { zipBytes: file.data.length } : {}) },
+      skipped: col.skipped,
+      missing: col.missing,
+      note: CONVERTED[target.format],
     });
   });
 }
@@ -395,7 +447,7 @@ export function saveExport(ctx: LocalContext, args: Record<string, unknown>, sig
   return guarded(async () => {
     await ctx.auth.bearer();
     const id = projectId(args.project);
-    if (!id) return refusalResult(refusal("bad_project", "`project` is not a HeyPCB project id.", "Pass the id list_projects or upload_kicad_project returned (or the project's https://heypcb.ai/p/<id> link)."));
+    if (!id) return refusalResult(refusal("bad_project", "`project` is not a HeyPCB project id.", "Pass the id list_projects or upload_project returned (or the project's https://heypcb.ai/p/<id> link)."));
     const kind = String(args.kind ?? "") as ExportKind;
     if (!EXPORT_KINDS.includes(kind)) return refusalResult(refusal("bad_kind", `\`kind\` must be one of ${EXPORT_KINDS.join(", ")}.`, "Call save_export again with one of those kinds."));
     const dir = await resolveTargetDir(args.dir, { home: ctx.home, cwd: ctx.cwd, protectedDirs: [ctx.auth.store.dir] });
@@ -503,8 +555,9 @@ export async function callLocalTool(ctx: LocalContext, name: string, args: Recor
   switch (name) {
     case "open_kicad_project":
       return openKicadProject(ctx, a, signal);
+    case "upload_project":
     case "upload_kicad_project":
-      return uploadKicadProject(ctx, a, signal);
+      return uploadProject(ctx, a, signal);
     case "save_export":
       return saveExport(ctx, a, signal);
     case "install_parts":

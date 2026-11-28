@@ -28,8 +28,10 @@ pnpm run test:smoke    # the built file over stdio
 ```
 
 The package holds no design logic: it passes HeyPCB's remote MCP tools
-through unchanged and adds the two tools that need your files
-(`upload_kicad_project`, `save_export`). A change to what a remote tool
+through unchanged and adds the tools that need your files
+(`open_kicad_project`, `upload_project`, `save_export` and the rest). A
+board from Altium, Eagle or EasyEDA goes up as it is: HeyPCB's server
+converts it, never this package. A change to what a remote tool
 does belongs to HeyPCB's server, not here — an issue is the way to ask
 for one.
 
