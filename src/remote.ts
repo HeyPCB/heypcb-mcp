@@ -292,7 +292,7 @@ export class Remote {
         return refusal(
           "remote_unavailable",
           `HeyPCB's MCP server was not found at ${url} (HTTP ${status}).`,
-          "If you set HEYPCB_MCP_URL, check it. Otherwise HeyPCB may be updating: call the tool again in a few minutes. upload_kicad_project and save_export work without it.",
+          "If you set HEYPCB_MCP_URL, check it. Otherwise HeyPCB may be updating: call the tool again in a few minutes. upload_project and save_export work without it.",
           { retryable: true, status }
         );
       }

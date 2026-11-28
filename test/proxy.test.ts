@@ -60,7 +60,7 @@ test("lists the remote tools 1:1 (names, schemas, descriptions) and adds the loc
   );
   const instructions = client.getInstructions() ?? "";
   assert.match(instructions, /Fake HeyPCB remote: use echo\./, "the remote server's instructions are passed on");
-  assert.match(instructions, /upload_kicad_project/);
+  assert.match(instructions, /upload_project/);
 });
 
 test("forwards a call with the bearer and returns the result untouched", async () => {
@@ -210,8 +210,8 @@ test("without credentials: the offline names plus the local tools, and every too
     tools.map((t) => t.name),
     [...OFFLINE_CATALOG.map((t) => t.name), ...LOCAL_TOOLS.map((t) => t.name)]
   );
-  for (const name of ["build_board", "whoami", "upload_kicad_project", "save_export"]) {
-    const res = await client.callTool({ name, arguments: name === "save_export" ? { project: "p1", kind: "bom", dir: "~/x" } : name === "upload_kicad_project" ? { path: "~/x" } : {} });
+  for (const name of ["build_board", "whoami", "upload_project", "upload_kicad_project", "save_export"]) {
+    const res = await client.callTool({ name, arguments: name === "save_export" ? { project: "p1", kind: "bom", dir: "~/x" } : name.startsWith("upload_") ? { path: "~/x" } : {} });
     assert.equal(res.isError, true, name);
     const r = res.structuredContent as { ok: boolean; code: string; error: string; fix: string };
     assert.equal(r.ok, false);

@@ -35,7 +35,7 @@ import { FileApi, NEW_SUFFIX, pull, push, Workspace, WORKSPACE_DIR, Workspaces, 
 const LOCAL_NOTE =
   "This is HeyPCB's local MCP server (@heypcb/mcp). To work on a KiCad project on this computer, call open_kicad_project with its folder first and use the `project` id it returns: " +
   "every HeyPCB tool then keeps that folder in sync (your edits go up before a call, HeyPCB's come back after it, with backups). " +
-  "It also adds upload_kicad_project (a one-off copy on HeyPCB), save_export (HeyPCB's files to a folder here), " +
+  "It also adds upload_project (a one-off copy on HeyPCB of a KiCad project, or of an Altium, Eagle or EasyEDA board, which HeyPCB converts), save_export (HeyPCB's files to a folder here), " +
   "check_local / export_local (KiCad's own DRC, ERC and exports via kicad-cli, free) and restore_local. " +
   "A tool that answers ok:false explains itself in `error` and says what to do in `fix`.";
 

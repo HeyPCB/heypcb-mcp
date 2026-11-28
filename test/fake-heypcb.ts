@@ -4,7 +4,8 @@
  * contract's remote server is), the device-code and token endpoints, and the
  * REST routes the local tools call — the import, exports, the project file
  * API (revisions, 409 on a stale base), part assets — and a charge ledger
- * keyed by idempotency key. Everything it receives is recorded.
+ * keyed by idempotency key. Everything it receives is recorded; each import
+ * upload also parsed (`imports`): the file as sent, its name and type.
  */
 import http from "node:http";
 import { AddressInfo } from "node:net";
@@ -79,6 +80,9 @@ export const REFUSAL = { ok: false, code: "wallet_empty", error: "Your HeyPCB ba
 
 export type Recorded = { method: string; path: string; headers: http.IncomingHttpHeaders; body: Buffer; sync?: { baseRevision: string; files: Array<{ path: string }>; delete: string[] } };
 
+/** What one POST /v1/projects/import carried: the multipart `file` part as sent, the `name` field, the key. */
+export type ImportUpload = { fileName: string; type: string; data: Buffer; name: string | null; idempotencyKey: string | null };
+
 export type FakeOptions = {
   /** Bearers /mcp and /v1 accept. Anything else is 401 token_expired. */
   acceptTokens?: Set<string>;
@@ -117,6 +121,8 @@ export type Fake = {
   rpc: Array<{ method?: string; id?: unknown; params?: Record<string, unknown> }>;
   /** JSON-RPC ids of tools/call requests the fake saw cancelled. */
   cancelled: unknown[];
+  /** Every import upload, parsed, in the order it arrived. */
+  imports: ImportUpload[];
   opts: FakeOptions;
   projects: Map<string, FakeProject>;
   /** Idempotency key → amount charged. */
@@ -145,6 +151,7 @@ export async function startFakeHeypcb(opts: FakeOptions = {}): Promise<Fake> {
   const requests: Recorded[] = [];
   const rpc: Fake["rpc"] = [];
   const cancelled: unknown[] = [];
+  const imports: ImportUpload[] = [];
   const inflight = new Map<string, AbortController>();
   let tokenIdx = 0;
   let importIdx = 0;
@@ -305,15 +312,18 @@ export async function startFakeHeypcb(opts: FakeOptions = {}): Promise<Fake> {
       }
       if (url.pathname === "/v1/projects/import" && req.method === "POST") {
         if (!bearerOk(req)) return unauthorized(res);
+        const upload = await importUpload(body, req.headers);
+        if (upload) imports.push(upload);
         const list = opts.importAnswers ?? [{ status: 200, body: { ok: true, project: { id: `prj_${123 + projects.size}`, name: "fake", revision: "r1" } } }];
         const a = list[Math.min(importIdx++, list.length - 1)];
         const id = (a.body.project as { id?: string } | undefined)?.id;
         if (a.status === 200 && id) {
-          // Keep what was uploaded, as the server's copy of the project.
-          const zip = parseZipUpload(body, String(req.headers["content-type"] ?? ""));
-          const files = zip ? readZip(zip) : new Map<string, Buffer>();
+          // Keep what was uploaded, as the server's copy of the project: a zip's
+          // files, or one board file under its own name (the real import converts it).
+          const zipped = upload && /\.zip$/i.test(upload.fileName);
+          const files = zipped ? readZip(upload.data) : new Map<string, Buffer>(upload ? [[upload.fileName, upload.data]] : []);
           const pro = [...files.keys()].find((f) => /\.kicad_(pro|pcb|sch)$/.test(f) && !f.includes("/"));
-          projects.set(id, { revision: 1, files, stem: pro ? pro.replace(/\.kicad_(pro|pcb|sch)$/, "") : "board" });
+          projects.set(id, { revision: 1, files, stem: pro ? pro.replace(/\.kicad_(pro|pcb|sch)$/, "") : upload && !zipped ? upload.fileName.replace(/\.[^.]+$/, "") : "board" });
         }
         return json(res, a.status, a.body);
       }
@@ -392,6 +402,7 @@ export async function startFakeHeypcb(opts: FakeOptions = {}): Promise<Fake> {
     requests,
     rpc,
     cancelled,
+    imports,
     opts,
     projects,
     ledger,
@@ -406,21 +417,22 @@ export async function startFakeHeypcb(opts: FakeOptions = {}): Promise<Fake> {
   };
 }
 
-/** The `file` part of a multipart upload. */
-function parseZipUpload(body: Buffer, contentType: string): Buffer | null {
-  const m = /boundary=(?:"([^"]+)"|([^;]+))/.exec(contentType);
-  if (!m) return null;
-  const boundary = Buffer.from(`--${m[1] ?? m[2]}`);
-  let at = body.indexOf(boundary);
-  while (at >= 0) {
-    const next = body.indexOf(boundary, at + boundary.length);
-    if (next < 0) break;
-    const part = body.subarray(at + boundary.length, next);
-    const headEnd = part.indexOf("\r\n\r\n");
-    if (headEnd >= 0 && /name="file"/.test(part.subarray(0, headEnd).toString("utf8"))) return part.subarray(headEnd + 4, part.length - 2);
-    at = next;
-  }
-  return null;
+/** The `file` part of an import upload and its `name` field, or null when it is not multipart with a file. */
+async function importUpload(body: Buffer, headers: http.IncomingHttpHeaders): Promise<ImportUpload | null> {
+  const type = String(headers["content-type"] ?? "");
+  if (!type.startsWith("multipart/form-data")) return null;
+  const form = await new Response(new Uint8Array(body), { headers: { "content-type": type } }).formData();
+  const file = form.get("file");
+  if (!file || typeof file === "string") return null;
+  const name = form.get("name");
+  const key = headers["idempotency-key"];
+  return {
+    fileName: (file as Blob & { name?: string }).name ?? "",
+    type: file.type,
+    data: Buffer.from(await file.arrayBuffer()),
+    name: typeof name === "string" ? name : null,
+    idempotencyKey: typeof key === "string" ? key : null,
+  };
 }
 
 const SYMBOL = (name: string) =>

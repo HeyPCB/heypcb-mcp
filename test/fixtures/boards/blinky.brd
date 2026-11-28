@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE eagle SYSTEM "eagle.dtd">
+<!-- Synthetic Eagle board for @heypcb/mcp tests. -->
+<eagle version="9.6.2">
+<drawing>
+<board>
+<plain>
+<wire x1="0" y1="0" x2="20" y2="0" width="0" layer="20"/>
+<wire x1="20" y1="0" x2="20" y2="10" width="0" layer="20"/>
+<wire x1="20" y1="10" x2="0" y2="10" width="0" layer="20"/>
+<wire x1="0" y1="10" x2="0" y2="0" width="0" layer="20"/>
+</plain>
+<signals>
+<signal name="LED">
+<wire x1="2" y1="5" x2="18" y2="5" width="0.254" layer="1"/>
+<via x="10" y="5" extent="1-16" drill="0.3"/>
+</signal>
+</signals>
+</board>
+</drawing>
+</eagle>

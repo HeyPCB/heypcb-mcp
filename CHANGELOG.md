@@ -5,6 +5,27 @@ remote server and change there, whichever version of this package you run.
 Each release also lists the tool changes since the previous release that an
 agent will notice.
 
+## Unreleased
+
+### This package
+
+- **`upload_project` takes boards from Altium, Eagle and EasyEDA.** It was
+  `upload_kicad_project`, which refused anything but KiCad (`not_kicad`).
+  An Altium `.PcbDoc`, an Eagle or KiCad 3 `.brd`, an EasyEDA `.json` or an
+  EasyEDA Pro `.epro` / `.epro2` now goes up as it is, and HeyPCB's import
+  converts it into a KiCad project, as the dashboard's import does. An
+  Altium project's folder or `.PrjPcb` sends the `.PrjPcb` with the
+  `.PcbDoc` and `.SchDoc` files it lists, zipped. A KiCad project uploads
+  exactly as before, and a folder is still searched for one first. The
+  result now says the `format`. The same rules hold for every format:
+  nothing outside the folder, at most 50 MB, nothing `.heypcbignore` names.
+  A file that is no project or board is refused as `unsupported_file_type`
+  (it was `not_kicad`); `open_kicad_project` and the other KiCad tools still
+  take KiCad projects only.
+- **`upload_kicad_project` still works**: it is listed as the old name of
+  `upload_project` and runs the same tool, so setups and allow-lists that
+  name it keep working.
+
 ## 0.1.8
 
 ### This package

@@ -3,12 +3,12 @@
  * HeyPCB project, which shadows it. HeyPCB's tools keep running on the
  * server; this module keeps the two copies in step around each call:
  *
- * - push, before a call: the tracked files (the set `upload_kicad_project`
- *   sends, see kicad-files.ts) whose bytes changed here since the last sync
- *   go up in one `PUT /v1/projects/{id}/files` that names the revision they
- *   were based on. If HeyPCB's copy moved on meanwhile (an edit on the web)
- *   the server answers 409 and nothing is overwritten on either side
- *   (`workspace_conflict`).
+ * - push, before a call: the tracked files (the set `upload_project` sends
+ *   for a KiCad project, see kicad-files.ts) whose bytes changed here since
+ *   the last sync go up in one `PUT /v1/projects/{id}/files` that names the
+ *   revision they were based on. If HeyPCB's copy moved on meanwhile (an
+ *   edit on the web) the server answers 409 and nothing is overwritten on
+ *   either side (`workspace_conflict`).
  * - pull, after a call that changed the design: the files whose hash on
  *   HeyPCB differs from the one last synced come down. The file here is
  *   copied to `.heypcb/backup/<revision>/` first and replaced atomically
